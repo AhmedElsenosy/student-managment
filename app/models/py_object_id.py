@@ -1,11 +1,11 @@
-from pydantic import BaseModel, Field
 from bson import ObjectId
+from typing import Any
 
 class PyObjectId(ObjectId):
     """Custom ObjectId that works with Pydantic v2"""
     
     @classmethod
-    def __get_pydantic_core_schema__(cls, source_type, handler):
+    def __get_pydantic_core_schema__(cls, source_type: Any, handler):
         from pydantic_core import core_schema
         return core_schema.with_info_plain_validator_function(
             cls._pydantic_validate,
@@ -13,7 +13,7 @@ class PyObjectId(ObjectId):
         )
     
     @classmethod
-    def _pydantic_validate(cls, value, info=None):
+    def _pydantic_validate(cls, value: Any, info=None):
         if isinstance(value, ObjectId):
             return value  # Return the ObjectId directly
         if isinstance(value, str) and ObjectId.is_valid(value):
@@ -25,14 +25,3 @@ class PyObjectId(ObjectId):
         schema = handler(schema)
         schema.update(type="string", format="objectid")
         return schema
-
-class AssistantModel(BaseModel):
-    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
-    name: str
-    hashed_password: str
-    is_active: bool = True
-
-    class Config:
-        allow_population_by_field_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}

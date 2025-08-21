@@ -4,15 +4,13 @@ from bson import ObjectId
 from pydantic import Field
 from typing import Optional, List
 from pydantic import Field, BaseModel
-
-
-
+from app.models.common import PyObjectId
 
 class ExamEntry(BaseModel):
-    exam_id: str
+    exam_id: PyObjectId
     degree: Optional[float] = None
     percentage: Optional[float] = None
-    delivery_time: datetime
+    delivery_time: Optional[datetime] = None
     solution_photo: Optional[str] = None
 
 
@@ -21,14 +19,14 @@ class StudentDocument(Document):
     student_id: int
     first_name: str
     last_name: str
-    email: str
+    email: Optional[str] = None
     phone_number: str
     guardian_number: str
-    birth_date: date
-    national_id: str
+    birth_date: Optional[date] = None
+    national_id: Optional[str] = None
     gender: str
     level: int
-    school_name: str
+    school_name: Optional[str] = None
     is_subscription: Optional[bool] = Field(default=False)
     created_at: datetime
     exams: List[ExamEntry] = Field(default_factory=list)

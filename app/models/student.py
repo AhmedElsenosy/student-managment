@@ -4,8 +4,10 @@ from datetime import date, datetime
 from typing import Optional, List, Dict
 from beanie import Document
 from app.schemas.student import ExamEntry
+from app.models.py_object_id import PyObjectId 
 
 class StudentModel(Document):  
+    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
     student_id: int
     first_name: str
     last_name: str

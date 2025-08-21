@@ -67,6 +67,10 @@ async def get_next_student_id():
 
 @router.get("/next-ids")
 async def get_next_ids():
+    """
+    Get the next available student ID and UID without incrementing the counter.
+    The counter will only be incremented when the student is actually created.
+    """
     counter = await Counter.find_one(Counter.name == "student_id")
     next_id = counter.sequence_value + 1 if counter else 10000
     return {"student_id": next_id, "uid": next_id}

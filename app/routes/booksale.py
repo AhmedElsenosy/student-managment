@@ -14,12 +14,34 @@ from beanie import PydanticObjectId
 from beanie.operators import In
 from collections import defaultdict
 from typing import List
+from app.database import db
 
 
 router = APIRouter(prefix="/finance/booksales", tags=["Finance"])
 
 @router.post("/", response_model=BookSaleResponse)
 async def create_book_sale(data: BookSaleCreate, assistant=Depends(get_current_assistant)):
+    # ----------------------------
+    # Validate inventory
+    # ----------------------------
+    inventory_collection = db["inventory"]
+    
+    # Check if book exists in inventory
+    book_inventory = await inventory_collection.find_one({"name": data.name})
+    if not book_inventory:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Book '{data.name}' not found in inventory"
+        )
+    
+    # Check if there's enough quantity (assuming 1 book per sale)
+    if book_inventory["quantity"] < 1:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Insufficient quantity for book '{data.name}'. Available: {book_inventory['quantity']}"
+        )
+    
+    # Create the book sale
     sale = BookSale(
         id=await get_next_id("booksales"),
         student_id=ObjectId(data.student_id),
@@ -29,6 +51,14 @@ async def create_book_sale(data: BookSaleCreate, assistant=Depends(get_current_a
         created_at=datetime.utcnow()
     )
     await sale.insert()
+    
+    # ----------------------------
+    # Update inventory quantity
+    # ----------------------------
+    await inventory_collection.update_one(
+        {"name": data.name},
+        {"$inc": {"quantity": -1}}  # Decrease quantity by 1
+    )
 
     # ----------------------------
     # Update Student subscription
@@ -66,8 +96,27 @@ async def delete_booksale(id: int, assistant=Depends(get_current_assistant)):
     if not book_sale_doc:
         raise HTTPException(status_code=404, detail=f"BookSale with id {id} not found")
     
+    # Store book name before deletion for inventory restoration
+    book_name = book_sale_doc.name
+    
+    # Delete the book sale
     await book_sale_doc.delete()
-    return {"message": f"BookSale with id {id} deleted successfully"}
+    
+    # ----------------------------
+    # Restore inventory quantity
+    # ----------------------------
+    inventory_collection = db["inventory"]
+    
+    # Check if book still exists in inventory (in case it was deleted)
+    book_inventory = await inventory_collection.find_one({"name": book_name})
+    if book_inventory:
+        # Restore the quantity by adding 1 back
+        await inventory_collection.update_one(
+            {"name": book_name},
+            {"$inc": {"quantity": 1}}  # Increase quantity by 1
+        )
+    
+    return {"message": f"BookSale with id {id} deleted successfully and inventory restored"}
 
 
 @router.post("/by-month")

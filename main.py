@@ -15,6 +15,7 @@ from app.routes import archive_management
 from app.routes import financial_reports
 from app.routes import blacklist
 from app.routes import internal
+from app.routes import inventory
 from app.models.exam import ExamModel
 from app.models.student_document import StudentDocument
 from app.models.student import StudentModel
@@ -86,6 +87,7 @@ app.include_router(archive_management.router)
 app.include_router(financial_reports.router)
 app.include_router(blacklist.router)
 app.include_router(internal.router)
+app.include_router(inventory.router)
 
 
 @app.get("/")

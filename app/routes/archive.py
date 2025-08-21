@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from bson import ObjectId
 from app.database import student_collection, archived_student_collection
 from app.models.archived_student import ArchivedStudentModel
@@ -44,8 +44,14 @@ async def archive_unpaid_students():
             student["archive_reason"] = "Unpaid for 2 consecutive months"
             student["archived"] = True
 
-            archived_student = ArchivedStudentModel(**student)
-            await archived_student_collection.insert_one(archived_student.dict())
+            # Convert date objects to datetime for BSON compatibility
+            student_data = student.copy()
+            if "birth_date" in student_data and student_data["birth_date"] is not None:
+                if isinstance(student_data["birth_date"], date) and not isinstance(student_data["birth_date"], datetime):
+                    student_data["birth_date"] = datetime.combine(student_data["birth_date"], datetime.min.time())
+            
+            # Use direct MongoDB insert to avoid Pydantic validation issues
+            await archived_student_collection.insert_one(student_data)
 
             # Delete the student from the student collection
             await student_collection.delete_one({"_id": student_id})
@@ -58,6 +64,11 @@ async def move_student_to_archive(student_id: int, archive_reason: str):
     archived_student_data = student.copy()
     archived_student_data["archived_at"] = datetime.utcnow()
     archived_student_data["archive_reason"] = archive_reason
+    
+    # Convert date objects to datetime for BSON compatibility
+    if "birth_date" in archived_student_data and archived_student_data["birth_date"] is not None:
+        if isinstance(archived_student_data["birth_date"], date) and not isinstance(archived_student_data["birth_date"], datetime):
+            archived_student_data["birth_date"] = datetime.combine(archived_student_data["birth_date"], datetime.min.time())
     
     await archived_student_collection.insert_one(archived_student_data)
     await student_collection.delete_one({"student_id": student_id})
@@ -76,6 +87,11 @@ async def restore_student_from_archive(student_id: int):
     student_data.pop("archive_reason", None)
     student_data["archived"] = False
     student_data["months_without_payment"] = 0
+    
+    # Convert date objects to datetime for BSON compatibility
+    if "birth_date" in student_data and student_data["birth_date"] is not None:
+        if isinstance(student_data["birth_date"], date) and not isinstance(student_data["birth_date"], datetime):
+            student_data["birth_date"] = datetime.combine(student_data["birth_date"], datetime.min.time())
     
     # Insert back into students collection
     await student_collection.insert_one(student_data)
