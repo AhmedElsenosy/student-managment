@@ -138,8 +138,8 @@ async def get_all_students(page: int = 1, limit: int = 25):
     # Calculate skip from page number
     skip = (page - 1) * limit
     
-    # Get students with pagination
-    students = await students_collection.find().skip(skip).limit(limit).to_list(length=None)
+    # Get students with pagination (newest first)
+    students = await students_collection.find().sort([("_id", -1)]).skip(skip).limit(limit).to_list(length=None)
     result = []
     for student in students:
         student["id"] = str(student["_id"])
