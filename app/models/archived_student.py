@@ -9,14 +9,14 @@ class ArchivedStudentModel(Document):
     student_id: int
     first_name: str
     last_name: str
-    email: str
+    email: Optional[str] = None
     phone_number: str
     guardian_number: str
     birth_date: Optional[date] = None
     national_id: Optional[str] = None
     gender: str
     level: int
-    school_name: str
+    school_name: Optional[str] = None
     is_subscription: bool
     created_at: date
     exams: List[ExamEntry] = []
