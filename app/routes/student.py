@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, status, Depends, Query
+from fastapi import APIRouter, HTTPException, status, Depends, Query, Request
 from app.database import db
 from app.schemas.student import StudentCreate, StudentOut, StudentUpdate, StudentBase, PaginatedStudentsResponse
 from app.models.student import StudentModel
@@ -203,16 +203,23 @@ async def update_student(student_id: int, student_update: StudentUpdate):
 
 
 @router.delete("/{student_id}")
-async def delete_student(student_id: int):
+async def delete_student(student_id: int, request: Request):
     # Delete from MongoDB
     result = await students_collection.delete_one({"student_id": student_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Student not found")
 
-    # Notify fingerprint backend
+    # Notify fingerprint backend with auth headers
     try:
+        # Get auth token from request headers
+        token = request.headers.get("authorization")
+        headers = {"Authorization": token} if token else {}
+        
         async with httpx.AsyncClient() as client:
-            response = await client.delete(f"{HOST_REMOTE_URL}/students/delete_fingerprint/{student_id}")
+            response = await client.delete(
+                f"{HOST_REMOTE_URL}/students/delete_fingerprint/{student_id}",
+                headers=headers
+            )
             response.raise_for_status()
     except httpx.HTTPError as e:
         raise HTTPException(status_code=500, detail=f"Student deleted from DB, but failed to remove from fingerprint device: {str(e)}")

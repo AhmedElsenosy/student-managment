@@ -29,7 +29,8 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 async def test_file_upload(
     model_1_solution: UploadFile = File(None),
     model_2_solution: UploadFile = File(None), 
-    model_3_solution: UploadFile = File(None)
+    model_3_solution: UploadFile = File(None),
+    assistant=Depends(get_current_assistant)
 ):
     """Debug endpoint to test file uploads"""
     results = []
@@ -133,7 +134,7 @@ async def create_exam(
 
 
 @router.get("/", response_model=PaginatedExamsResponse)
-async def get_all_exams(page: int = 1, limit: int = 25):
+async def get_all_exams(page: int = 1, limit: int = 25, assistant=Depends(get_current_assistant)):
     # Get total count
     total = await exams_collection.count_documents({})
     
@@ -265,7 +266,7 @@ async def add_student_to_exam(
 
 
 @router.get("/{exam_id}/students")
-async def get_students_for_exam(exam_id: str):
+async def get_students_for_exam(exam_id: str, assistant=Depends(get_current_assistant)):
     # Fetch exam
     exam = await exams_collection.find_one({"_id": ObjectId(exam_id)})
     if not exam:

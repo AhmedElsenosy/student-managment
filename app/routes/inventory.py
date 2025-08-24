@@ -1,11 +1,13 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from bson import ObjectId
 from app.database import db
 from app.schemas.inventory import BookInventoryCreate, BookInventoryResponse, BookInventoryUpdate
+from app.dependencies.auth import get_current_assistant
 
 router = APIRouter(
     prefix="/inventory",
-    tags=["Inventory"]
+    tags=["Inventory"],
+    dependencies=[Depends(get_current_assistant)]
 )
 
 collection = db["inventory"]

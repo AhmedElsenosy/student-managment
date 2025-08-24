@@ -1,6 +1,6 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from datetime import time
-from typing import Optional, List
+from typing import Optional, List, Union
 from enum import Enum
 from beanie import PydanticObjectId
 from app.models.group import PyObjectId
@@ -32,9 +32,22 @@ class GroupUpdate(BaseModel):
 class GroupOut(BaseModel):
     id: str
     group_name: str
-    start_time: time
+    start_time: Union[time, str]
     level: int
     days: List[DayOfWeek]
+    
+    @field_validator('start_time', mode='before')
+    @classmethod
+    def parse_time(cls, v):
+        if isinstance(v, str):
+            # Handle both "7:00" and "07:00" formats
+            if ':' in v:
+                parts = v.split(':')
+                if len(parts) == 2:
+                    hour = parts[0].zfill(2)  # Pad with zero if needed
+                    minute = parts[1].zfill(2)  # Pad with zero if needed
+                    return f"{hour}:{minute}"
+        return v
 
 class AddStudentToGroup(BaseModel):
     student_id: PyObjectId

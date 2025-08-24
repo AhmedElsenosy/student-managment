@@ -8,13 +8,14 @@ import numpy as np
 import os
 import base64
 from utils.bubble_sheet_processor import process_bubble_sheet
+from app.dependencies.auth import get_current_assistant
 
 load_dotenv()
 
 bubbles_router = APIRouter(prefix="/bubble", tags=["Bubble"])
 
 @bubbles_router.post("/process")
-async def process_bubble_sheet_endpoint(image_file: UploadFile = File(...)):
+async def process_bubble_sheet_endpoint(image_file: UploadFile = File(...), assistant=Depends(get_current_assistant)):
     try:
         contents = await image_file.read()
         image = cv2.imdecode(np.frombuffer(contents, np.uint8), cv2.IMREAD_COLOR)
