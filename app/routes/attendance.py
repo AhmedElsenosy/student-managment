@@ -590,3 +590,52 @@ async def get_student_attendance_direct(student_id: str, assistant=Depends(get_c
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@router.post("/make-attendance/{uid}")
+async def make_attendance_by_uid(uid: int, assistant=Depends(get_current_assistant)):
+    """
+    Make attendance for a student using their UID (moved from fingerprint backend)
+    This endpoint allows manual attendance marking by UID
+    """
+    try:
+        # Find the student by UID
+        student = await StudentModel.find_one(StudentModel.uid == uid)
+        if not student:
+            raise HTTPException(status_code=404, detail="Student not found")
+        
+        # Get current timestamp and date in Egypt timezone
+        egypt_tz = pytz.timezone("Africa/Cairo")
+        now = datetime.now(egypt_tz)
+        iso_timestamp = now.isoformat()
+        date_key = now.strftime("%Y-%m-%d")
+        
+        # Initialize attendance if it doesn't exist
+        if not hasattr(student, "attendance") or not isinstance(student.attendance, dict):
+            student.attendance = {}
+        
+        # Mark attendance as present with assistant approved (bypasses schedule validation)
+        student.attendance[date_key] = True
+        await student.save()
+        
+        # Get student's group name for response
+        group = await Group.find(Group.students == student.id).first_or_none()
+        group_name = group.group_name if group else "No Group"
+        
+        return {
+            "success": True,
+            "message": "Manual attendance recorded successfully",
+            "uid": uid,
+            "student": f"{student.first_name} {student.last_name}",
+            "group": group_name,
+            "date": date_key,
+            "status": True,
+            "timestamp": iso_timestamp,
+            "is_manual": True,
+            "assistant_approved": True
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to mark attendance: {str(e)}")
