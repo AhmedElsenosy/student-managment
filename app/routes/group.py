@@ -30,7 +30,8 @@ async def get_all_groups():
         group_name=group.group_name,
         start_time=group.start_time,
         level=group.level,
-        days=group.days
+        days=group.days,
+        student_count=len(group.students) if group.students else 0
     ) for group in groups]
 
 

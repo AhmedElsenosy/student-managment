@@ -386,6 +386,7 @@ async def get_all_sales(
                 group = await Group.find(Group.students == ObjectId(student['_id'])).first_or_none()
                 
                 sales_data.append({
+                    "id": sale.id,
                     "student_name": f"{student['first_name']} {student['last_name']}",
                     "student_level": student.get('level'),
                     "student_group": group.group_name if group else None,
@@ -407,6 +408,7 @@ async def get_all_sales(
                 group = await Group.find(Group.students == ObjectId(student['_id'])).first_or_none()
                 
                 sales_data.append({
+                    "id": sale.id,
                     "student_name": f"{student['first_name']} {student['last_name']}",
                     "student_level": student.get('level'),
                     "student_group": group.group_name if group else None,

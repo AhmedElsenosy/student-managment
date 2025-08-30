@@ -35,6 +35,7 @@ class GroupOut(BaseModel):
     start_time: Union[time, str]
     level: int
     days: List[DayOfWeek]
+    student_count: int = 0
     
     @field_validator('start_time', mode='before')
     @classmethod
