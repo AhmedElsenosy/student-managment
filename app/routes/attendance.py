@@ -114,13 +114,23 @@ async def auto_attendance(data: AttendanceRequest, assistant=Depends(get_current
     }
 
 @router.get("/absent")
-async def get_all_absent_students(page: int = 1, limit: int = 10, assistant=Depends(get_current_assistant)):
+async def get_all_absent_students(
+    page: int = 1, 
+    limit: int = 10, 
+    q: str = None,
+    level: int = None,
+    group_name: str = None,
+    assistant=Depends(get_current_assistant)
+):
     """
     Get all students who have absent records (attendance = False) and their absent dates
     
     Args:
         page: Page number (1-based, default: 1)
         limit: Number of students per page (default: 10)
+        q: Optional search query to filter by student names (case-insensitive partial match)
+        level: Optional filter by student level (1, 2, or 3)
+        group_name: Optional filter by group name
     
     Returns:
         Dictionary containing paginated students with absent records and their specific absent dates
@@ -140,7 +150,48 @@ async def get_all_absent_students(page: int = 1, limit: int = 10, assistant=Depe
         absent_students = []
         total_absent_records = 0
         
+        # Get group filter constraint if provided
+        group_student_ids = None
+        if group_name:
+            group = await Group.find_one(Group.group_name == group_name)
+            if group:
+                group_student_ids = set(str(student_id) for student_id in group.students)
+            else:
+                # Group not found, return empty result
+                return {
+                    "success": True,
+                    "students": [],
+                    "pagination": {
+                        "current_page": page,
+                        "limit": limit,
+                        "total_pages": 0,
+                        "total_students": 0,
+                        "has_next": False,
+                        "has_previous": page > 1
+                    },
+                    "summary": {
+                        "total_students_with_absences": 0,
+                        "total_absent_records": 0,
+                        "most_absent_student": None,
+                        "showing_students": 0
+                    },
+                    "filters_applied": {
+                        "search_query": q,
+                        "level_filter": level,
+                        "group_filter": group_name
+                    },
+                    "message": f"Group '{group_name}' not found"
+                }
+
         async for student in students_cursor:
+            # Apply level filter
+            if level is not None and student.get("level") != level:
+                continue
+                
+            # Apply group filter
+            if group_student_ids is not None and str(student["_id"]) not in group_student_ids:
+                continue
+            
             attendance_records = student.get("attendance", {})
             
             # Find all absent dates (where attendance = False)
@@ -162,18 +213,18 @@ async def get_all_absent_students(page: int = 1, limit: int = 10, assistant=Depe
                 absent_dates.sort(key=lambda x: x["date"], reverse=True)
                 
                 # Get student's group name
-                group_name = None
+                group_name_value = None
                 try:
                     student_obj = await StudentModel.find_one(StudentModel.id == PyObjectId(str(student["_id"])))
                     if student_obj:
                         group = await Group.find(Group.students == student_obj.id).first_or_none()
                         if group:
-                            group_name = group.group_name
+                            group_name_value = group.group_name
                 except Exception:
                     # If group lookup fails, continue without group name
                     pass
                 
-                absent_students.append({
+                student_data = {
                     "student_info": {
                         "id": str(student["_id"]),
                         "student_id": student.get("student_id"),
@@ -182,13 +233,28 @@ async def get_all_absent_students(page: int = 1, limit: int = 10, assistant=Depe
                         "email": student.get("email"),
                         "level": student.get("level"),
                         "uid": student.get("uid"),
-                        "group_name": group_name
+                        "group_name": group_name_value
                     },
                     "absent_dates": absent_dates,
                     "total_absent_days": len(absent_dates)
-                })
+                }
                 
-                total_absent_records += len(absent_dates)
+                # Apply search filter
+                if q:
+                    first_name = student.get("first_name", "").lower()
+                    last_name = student.get("last_name", "").lower()
+                    full_name = f"{first_name} {last_name}".strip()
+                    search_query = q.lower()
+                    
+                    # Check if search query matches any name component
+                    if (search_query in first_name or 
+                        search_query in last_name or 
+                        search_query in full_name):
+                        absent_students.append(student_data)
+                        total_absent_records += len(absent_dates)
+                else:
+                    absent_students.append(student_data)
+                    total_absent_records += len(absent_dates)
         
         # Sort students by number of absent days (descending), then by name
         absent_students.sort(key=lambda x: (-x["total_absent_days"], x["student_info"]["first_name"] or "", x["student_info"]["last_name"] or ""))
@@ -219,6 +285,11 @@ async def get_all_absent_students(page: int = 1, limit: int = 10, assistant=Depe
                     "absent_days": absent_students[0]['total_absent_days']
                 } if absent_students else None,
                 "showing_students": len(paginated_students)
+            },
+            "filters_applied": {
+                "search_query": q,
+                "level_filter": level,
+                "group_filter": group_name
             }
         }
         
@@ -227,7 +298,14 @@ async def get_all_absent_students(page: int = 1, limit: int = 10, assistant=Depe
 
 
 @router.get("/present")
-async def get_all_present_students(page: int = 1, limit: int = 10, assistant=Depends(get_current_assistant)):
+async def get_all_present_students(
+    page: int = 1, 
+    limit: int = 10, 
+    q: str = None,
+    level: int = None,
+    group_name: str = None,
+    assistant=Depends(get_current_assistant)
+):
     """
     Get all students who have only present attendance records (no absent records)
     Perfect attendance students - those who have never been marked absent
@@ -235,6 +313,9 @@ async def get_all_present_students(page: int = 1, limit: int = 10, assistant=Dep
     Args:
         page: Page number (1-based, default: 1)
         limit: Number of students per page (default: 10)
+        q: Optional search query to filter by student names (case-insensitive partial match)
+        level: Optional filter by student level (1, 2, or 3)
+        group_name: Optional filter by group name
     
     Returns:
         Dictionary containing paginated students with perfect attendance and their present dates
@@ -254,7 +335,49 @@ async def get_all_present_students(page: int = 1, limit: int = 10, assistant=Dep
         perfect_attendance_students = []
         total_present_records = 0
         
+        # Get group filter constraint if provided
+        group_student_ids = None
+        if group_name:
+            group = await Group.find_one(Group.group_name == group_name)
+            if group:
+                group_student_ids = set(str(student_id) for student_id in group.students)
+            else:
+                # Group not found, return empty result
+                return {
+                    "success": True,
+                    "students": [],
+                    "pagination": {
+                        "current_page": page,
+                        "limit": limit,
+                        "total_pages": 0,
+                        "total_students": 0,
+                        "has_next": False,
+                        "has_previous": page > 1
+                    },
+                    "summary": {
+                        "total_students_with_perfect_attendance": 0,
+                        "total_present_records": 0,
+                        "most_present_student": None,
+                        "average_present_days": 0,
+                        "showing_students": 0
+                    },
+                    "filters_applied": {
+                        "search_query": q,
+                        "level_filter": level,
+                        "group_filter": group_name
+                    },
+                    "message": f"Group '{group_name}' not found"
+                }
+        
         async for student in students_cursor:
+            # Apply level filter
+            if level is not None and student.get("level") != level:
+                continue
+                
+            # Apply group filter
+            if group_student_ids is not None and str(student["_id"]) not in group_student_ids:
+                continue
+            
             attendance_records = student.get("attendance", {})
             
             # Check if student has any absent records (False values)
@@ -279,18 +402,18 @@ async def get_all_present_students(page: int = 1, limit: int = 10, assistant=Dep
                 present_dates.sort(key=lambda x: x["date"], reverse=True)
                 
                 # Get student's group name
-                group_name = None
+                group_name_value = None
                 try:
                     student_obj = await StudentModel.find_one(StudentModel.id == PyObjectId(str(student["_id"])))
                     if student_obj:
                         group = await Group.find(Group.students == student_obj.id).first_or_none()
                         if group:
-                            group_name = group.group_name
+                            group_name_value = group.group_name
                 except Exception:
                     # If group lookup fails, continue without group name
                     pass
                 
-                perfect_attendance_students.append({
+                student_data = {
                     "student_info": {
                         "id": str(student["_id"]),
                         "student_id": student.get("student_id"),
@@ -299,14 +422,29 @@ async def get_all_present_students(page: int = 1, limit: int = 10, assistant=Dep
                         "email": student.get("email"),
                         "level": student.get("level"),
                         "uid": student.get("uid"),
-                        "group_name": group_name
+                        "group_name": group_name_value
                     },
                     "present_dates": present_dates,
                     "total_present_days": len(present_dates),
                     "perfect_attendance": True
-                })
+                }
                 
-                total_present_records += len(present_dates)
+                # Apply search filter
+                if q:
+                    first_name = student.get("first_name", "").lower()
+                    last_name = student.get("last_name", "").lower()
+                    full_name = f"{first_name} {last_name}".strip()
+                    search_query = q.lower()
+                    
+                    # Check if search query matches any name component
+                    if (search_query in first_name or 
+                        search_query in last_name or 
+                        search_query in full_name):
+                        perfect_attendance_students.append(student_data)
+                        total_present_records += len(present_dates)
+                else:
+                    perfect_attendance_students.append(student_data)
+                    total_present_records += len(present_dates)
         
         # Sort students by number of present days (descending), then by name
         perfect_attendance_students.sort(key=lambda x: (-x["total_present_days"], x["student_info"]["first_name"] or "", x["student_info"]["last_name"] or ""))
@@ -338,6 +476,11 @@ async def get_all_present_students(page: int = 1, limit: int = 10, assistant=Dep
                 } if perfect_attendance_students else None,
                 "average_present_days": round(total_present_records / len(perfect_attendance_students), 2) if perfect_attendance_students else 0,
                 "showing_students": len(paginated_students)
+            },
+            "filters_applied": {
+                "search_query": q,
+                "level_filter": level,
+                "group_filter": group_name
             },
             "message": f"Found {total_students} student(s) with perfect attendance (no absent records), showing {len(paginated_students)} on this page"
         }

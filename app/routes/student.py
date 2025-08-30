@@ -292,13 +292,17 @@ async def get_all_sales(
     page: int = Query(1, ge=1, description="Page number (starts from 1)"),
     limit: int = Query(25, ge=1, le=100, description="Number of items per page"),
     subscription_type: Optional[str] = Query(None, regex="^(monthsale|booksale)$", description="Filter by subscription type: monthsale or booksale"),
-    student_name: Optional[str] = Query(None, description="Search by student name (first name, last name, or full name)")
+    student_name: Optional[str] = Query(None, description="Search by student name (first name, last name, or full name)"),
+    level: Optional[int] = Query(None, ge=1, le=3, description="Filter by student level (1, 2, or 3)"),
+    group_name: Optional[str] = Query(None, description="Filter by group name")
 ):
     """
     Get all sales (monthsales and booksales) with pagination and optional filtering.
     
     Returns combined data from both monthsales and booksales collections with:
     - Student name
+    - Student level
+    - Student group
     - Subscription type (monthsale or booksale)
     - Month (for monthsales) or Book name (for booksales)
     - Price
@@ -309,23 +313,60 @@ async def get_all_sales(
         limit: Number of items per page (max 100)
         subscription_type: Optional filter - 'monthsale' or 'booksale'
         student_name: Optional search by student name (partial matching supported)
+        level: Optional filter by student level (1, 2, or 3)
+        group_name: Optional filter by group name
     """
     sales_data = []
     
-    # Helper function to check if student name matches search query
-    def matches_student_name(student, search_name):
-        if not search_name:
-            return True
+    # Get filtered student IDs if group filter is applied
+    filtered_student_ids = None
+    if group_name:
+        group_doc = await Group.find_one(Group.group_name == group_name)
+        if group_doc:
+            filtered_student_ids = group_doc.students
+        else:
+            # Group not found, return empty result
+            return {
+                "data": [],
+                "pagination": {
+                    "current_page": page,
+                    "total_pages": 0,
+                    "total_items": 0,
+                    "items_per_page": limit,
+                    "items_on_page": 0,
+                    "has_next": False,
+                    "has_prev": False
+                },
+                "message": f"Group '{group_name}' not found"
+            }
+    
+    # Helper function to check if student matches all filters
+    def matches_student_filters(student):
+        # Check name filter
+        if student_name:
+            search_lower = student_name.lower()
+            first_name = student.get('first_name', '').lower()
+            last_name = student.get('last_name', '').lower()
+            full_name = f"{first_name} {last_name}"
+            
+            name_match = (search_lower in first_name or 
+                         search_lower in last_name or 
+                         search_lower in full_name)
+            if not name_match:
+                return False
         
-        search_lower = search_name.lower()
-        first_name = student.get('first_name', '').lower()
-        last_name = student.get('last_name', '').lower()
-        full_name = f"{first_name} {last_name}"
+        # Check level filter
+        if level is not None:
+            if student.get('level') != level:
+                return False
         
-        # Check if search query matches first name, last name, or full name
-        return (search_lower in first_name or 
-                search_lower in last_name or 
-                search_lower in full_name)
+        # Check group filter (if filtered_student_ids is set)
+        if filtered_student_ids is not None:
+            student_object_id = ObjectId(student['_id'])
+            if student_object_id not in filtered_student_ids:
+                return False
+        
+        return True
     
     # Get monthsales if not filtering for booksales only
     if subscription_type != "booksale":
@@ -333,9 +374,14 @@ async def get_all_sales(
         for sale in monthsales:
             # Get student info
             student = await students_collection.find_one({"_id": sale.student_id})
-            if student and matches_student_name(student, student_name):
+            if student and matches_student_filters(student):
+                # Get group for student
+                group = await Group.find(Group.students == ObjectId(student['_id'])).first_or_none()
+                
                 sales_data.append({
                     "student_name": f"{student['first_name']} {student['last_name']}",
+                    "student_level": student.get('level'),
+                    "student_group": group.group_name if group else None,
                     "subscription_type": "monthsale",
                     "month_or_book": sale.month.strftime("%Y-%m") if sale.month else None,
                     "price": float(sale.price),
@@ -349,9 +395,14 @@ async def get_all_sales(
         for sale in booksales:
             # Get student info
             student = await students_collection.find_one({"_id": sale.student_id})
-            if student and matches_student_name(student, student_name):
+            if student and matches_student_filters(student):
+                # Get group for student
+                group = await Group.find(Group.students == ObjectId(student['_id'])).first_or_none()
+                
                 sales_data.append({
                     "student_name": f"{student['first_name']} {student['last_name']}",
+                    "student_level": student.get('level'),
+                    "student_group": group.group_name if group else None,
                     "subscription_type": "booksale",
                     "month_or_book": sale.name,  # Book name
                     "price": float(sale.price),
