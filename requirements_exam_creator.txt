@@ -1,0 +1,25 @@
+# Exam Creator Requirements
+# Additional dependencies for exam creation functionality
+
+# Core PDF generation
+reportlab>=4.0.0
+Pillow>=10.0.0
+
+# Image processing (if not already installed)
+opencv-python>=4.8.0
+
+# Data handling
+numpy>=1.24.0
+
+# Optional: Better font support
+# On Ubuntu: sudo apt-get install fonts-dejavu fonts-dejavu-core
+
+# All requirements from PDF assistant (if not already installed)
+pdf2image>=3.1.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# Note: You also need poppler-utils for PDF processing:
+# Ubuntu/Debian: sudo apt-get install poppler-utils
+# CentOS/RHEL: sudo yum install poppler-utils
+# macOS: brew install poppler

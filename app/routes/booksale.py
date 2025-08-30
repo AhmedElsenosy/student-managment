@@ -1,19 +1,20 @@
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Depends, HTTPException, Body, Query
 from fastapi.encoders import jsonable_encoder
 from datetime import datetime
 from app.models.booksale import BookSale
 from bson import ObjectId
 from app.models.booksale import BookSale
 from app.models.student import StudentModel
+from app.models.group import Group
 from app.models.counter import get_next_id
-from app.schemas.booksale import BookSaleCreate, BookSaleResponse, MonthQuery, BookSaleMonthSummary, BookSaleDetailResponse, PaginatedBookSalesResponse
+from app.schemas.booksale import BookSaleCreate, BookSaleResponse, MonthQuery, BookSaleMonthSummary, BookSaleDetailResponse, PaginatedBookSalesResponse, BookSaleMonthlyStats, FilteredBookSalesResponse
 from app.dependencies.auth import get_current_assistant
 from bson.decimal128 import Decimal128
 from decimal import Decimal
 from beanie import PydanticObjectId
 from beanie.operators import In
 from collections import defaultdict
-from typing import List
+from typing import List, Optional
 from app.database import db
 
 
@@ -120,7 +121,22 @@ async def delete_booksale(id: int, assistant=Depends(get_current_assistant)):
 
 
 @router.post("/by-month")
-async def get_booksales_by_month(query: MonthQuery, assistant=Depends(get_current_assistant)):
+async def get_booksales_by_month(
+    query: MonthQuery, 
+    page: int = Query(1, ge=1, description="Page number (starts from 1)"),
+    limit: int = Query(10, ge=1, le=100, description="Number of items per page (max 100)"),
+    level: Optional[int] = Query(None, ge=1, le=3, description="Filter by student level (1, 2, or 3)"),
+    group_name: Optional[str] = Query(None, description="Filter by group name"),
+    assistant=Depends(get_current_assistant)
+):
+    """
+    Get booksales for a specific month with optional filtering by level and group.
+    
+    Args:
+        query: MonthQuery containing the month in YYYY-MM format
+        level: Optional filter by student level (1, 2, or 3)
+        group_name: Optional filter by group name
+    """
     try:
         # Parse month string into datetime
         month_start = datetime.strptime(query.month, "%Y-%m")
@@ -130,17 +146,101 @@ async def get_booksales_by_month(query: MonthQuery, assistant=Depends(get_curren
         else:
             next_month = datetime(month_start.year, month_start.month + 1, 1)
 
-        # Query MongoDB using date range
-        booksales = await BookSale.find(
-            {"created_at": {"$gte": month_start, "$lt": next_month}}
-        ).to_list()
+        # Build student filters if level or group_name are provided
+        student_ids = None
+        if level is not None or group_name is not None:
+            # Build filters for students
+            student_filters = {}
+            if level is not None:
+                student_filters["level"] = level
+            
+            # Get filtered students
+            if group_name:
+                # Find group by name
+                group = await Group.find_one(Group.group_name == group_name)
+                if not group:
+                    return {"message": f"Group '{group_name}' not found", "booksales": []}
+                
+                # Get students in this group
+                if student_filters:
+                    students = await StudentModel.find(
+                        In(StudentModel.id, group.students),
+                        **student_filters
+                    ).to_list()
+                else:
+                    students = await StudentModel.find(In(StudentModel.id, group.students)).to_list()
+            else:
+                # Get all students or filtered by level only
+                if student_filters:
+                    students = await StudentModel.find(student_filters).to_list()
+                else:
+                    students = await StudentModel.find_all().to_list()
+            
+            # Get student IDs for filtering sales
+            student_ids = [student.id for student in students]
+            
+            if not student_ids:
+                return {
+                    "message": "No students found matching criteria",
+                    "booksales": [],
+                    "filters_applied": {"level": level, "group_name": group_name}
+                }
+
+        # Build the query for booksales
+        query_filter = {"created_at": {"$gte": month_start, "$lt": next_month}}
+        
+        # Get total count first (before pagination)
+        if student_ids is not None:
+            total_count = await BookSale.find(
+                In(BookSale.student_id, student_ids),
+                query_filter
+            ).count()
+        else:
+            total_count = await BookSale.find(query_filter).count()
+        
+        # Calculate pagination
+        skip = (page - 1) * limit
+        total_pages = (total_count + limit - 1) // limit  # Ceiling division
+        has_next = page < total_pages
+        has_prev = page > 1
+        
+        # Add student filter and pagination
+        if student_ids is not None:
+            booksales = await BookSale.find(
+                In(BookSale.student_id, student_ids),
+                query_filter
+            ).skip(skip).limit(limit).to_list()
+        else:
+            # Query MongoDB using date range with pagination
+            booksales = await BookSale.find(query_filter).skip(skip).limit(limit).to_list()
 
         # Convert ObjectIds to strings for JSON serialization
+        result = []
         for sale in booksales:
-            sale.id = str(sale.id)
-            sale.student_id = str(sale.student_id)
+            result.append({
+                "id": str(sale.id),
+                "student_id": str(sale.student_id),
+                "name": sale.name,
+                "price": float(sale.price),
+                "default_price": float(sale.default_price),
+                "created_at": sale.created_at.isoformat()
+            })
 
-        return booksales
+        return {
+            "booksales": result,
+            "total_count": total_count,
+            "page": page,
+            "limit": limit,
+            "total_pages": total_pages,
+            "has_next": has_next,
+            "has_prev": has_prev,
+            "filters_applied": {
+                "month": query.month,
+                "level": level,
+                "group_name": group_name,
+                "students_found": len(student_ids) if student_ids is not None else "all"
+            }
+        }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

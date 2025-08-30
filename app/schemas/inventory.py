@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 
 class BookInventoryCreate(BaseModel):
     name: str
@@ -19,3 +19,12 @@ class BookInventoryResponse(BaseModel):
     quantity: int
     price: float
     level: int
+
+class PaginatedBooksResponse(BaseModel):
+    books: List[BookInventoryResponse]
+    total: int
+    page: int
+    limit: int
+    total_pages: int
+    has_next: bool
+    has_prev: bool

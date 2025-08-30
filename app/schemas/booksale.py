@@ -39,3 +39,17 @@ class PaginatedBookSalesResponse(BaseModel):
     total_pages: int
     has_next: bool
     has_prev: bool
+
+class BookSaleMonthlyStats(BaseModel):
+    """Response model for monthly booksales statistics"""
+    month: str
+    month_name: str
+    booksales_count: int
+    total_revenue: float
+    books: List[dict]  # List of books sold with their details
+
+class FilteredBookSalesResponse(BaseModel):
+    """Response model for filtered booksales by month"""
+    monthly_stats: List[BookSaleMonthlyStats]
+    total_months: int
+    filters_applied: dict

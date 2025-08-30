@@ -1,11 +1,11 @@
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, status, Depends, Query
 from fastapi.encoders import jsonable_encoder
 from app.dependencies.auth import get_current_assistant
 from app.database import student_collection
 from bson import ObjectId
 from datetime import datetime
 from app.schemas.archived_student import ArchivedStudentOut, ArchiveRequest, PaginatedArchivedStudentsResponse
-from typing import List, Any, Dict
+from typing import List, Any, Dict, Optional
 from app.models.archived_student import ArchivedStudentModel
 
 # Helper function to convert ObjectIds to strings recursively
@@ -75,18 +75,157 @@ async def restore_student(student_id: str):
 
     return {"message": f"Student {student_id} restored successfully"}
 
+@router.get("/search", response_model=List[dict])
+async def search_archived_students(
+    q: str = Query(..., description="Search query for student name, phone number, or student ID"),
+    level: Optional[int] = Query(None, ge=1, le=3, description="Filter by student level (1, 2, or 3)")
+):
+    """
+    Search for archived students by name, phone number, or student ID with optional level filtering.
+    Supports partial matching and case-insensitive search.
+    Returns all matching results without pagination.
+    
+    Args:
+        q: Search query (name, phone, or student ID)
+        level: Optional filter by student level (1, 2, or 3)
+    """
+    from app.database import archived_student_collection
+    
+    try:
+        # Build search query with multiple criteria
+        search_criteria = [
+            # Search by first name (case-insensitive, partial match)
+            {"first_name": {"$regex": q, "$options": "i"}},
+            # Search by last name (case-insensitive, partial match)
+            {"last_name": {"$regex": q, "$options": "i"}},
+            # Search by full name (first + last)
+            {"$expr": {
+                "$regexMatch": {
+                    "input": {"$concat": ["$first_name", " ", "$last_name"]},
+                    "regex": q,
+                    "options": "i"
+                }
+            }},
+            # Search by phone number (exact or partial)
+            {"phone_number": {"$regex": q, "$options": "i"}},
+            # Search by guardian number (exact or partial)
+            {"guardian_number": {"$regex": q, "$options": "i"}}
+        ]
+        
+        # Add student_id search if query is numeric
+        try:
+            student_id_num = int(q)
+            search_criteria.append({"student_id": student_id_num})
+            search_criteria.append({"uid": student_id_num})
+        except ValueError:
+            # Query is not numeric, skip student_id search
+            pass
+        
+        # Build the final search query
+        search_query = {"$or": search_criteria}
+        
+        # Create list to hold all filters
+        filters = [{"$or": search_criteria}]
+        
+        # Add level filter if specified
+        if level is not None:
+            filters.append({"level": level})
+        
+        # Combine all filters
+        if len(filters) > 1:
+            search_query = {"$and": filters}
+        else:
+            search_query = filters[0]
+        
+        # Get all matching archived students (newest first by archived_at)
+        archived_students = await archived_student_collection.find(search_query).sort([("archived_at", -1)]).to_list(length=None)
+        
+        # Convert all ObjectId fields to strings recursively
+        result = [convert_objectids_to_strings(student) for student in archived_students]
+        
+        return result
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/", response_model=PaginatedArchivedStudentsResponse)
-async def get_all_archived_students(page: int = 1, limit: int = 25):
+async def get_all_archived_students(
+    page: int = Query(1, ge=1, description="Page number (starts from 1)"),
+    limit: int = Query(25, ge=1, le=100, description="Number of items per page (max 100)"),
+    q: Optional[str] = Query(None, description="Search query for student name, phone number, or student ID"),
+    level: Optional[int] = Query(None, ge=1, le=3, description="Filter by student level (1, 2, or 3)")
+):
+    """
+    Get all archived students with optional search and filtering, plus pagination.
+    
+    Args:
+        page: Page number (starts from 1)
+        limit: Number of items per page (max 100)
+        q: Optional search query (name, phone, or student ID)
+        level: Optional filter by student level (1, 2, or 3)
+    """
     from app.database import archived_student_collection
     try:
-        # Get total count
-        total = await archived_student_collection.count_documents({})
+        # Build search and filter query
+        search_query = {}
+        
+        # Add search functionality if q parameter is provided
+        if q:
+            # Build search criteria with multiple criteria (similar to regular students)
+            search_criteria = [
+                # Search by first name (case-insensitive, partial match)
+                {"first_name": {"$regex": q, "$options": "i"}},
+                # Search by last name (case-insensitive, partial match)
+                {"last_name": {"$regex": q, "$options": "i"}},
+                # Search by full name (first + last)
+                {"$expr": {
+                    "$regexMatch": {
+                        "input": {"$concat": ["$first_name", " ", "$last_name"]},
+                        "regex": q,
+                        "options": "i"
+                    }
+                }},
+                # Search by phone number (exact or partial)
+                {"phone_number": {"$regex": q, "$options": "i"}},
+                # Search by guardian number (exact or partial)
+                {"guardian_number": {"$regex": q, "$options": "i"}}
+            ]
+            
+            # Add student_id search if query is numeric
+            try:
+                student_id_num = int(q)
+                search_criteria.append({"student_id": student_id_num})
+                search_criteria.append({"uid": student_id_num})
+            except ValueError:
+                # Query is not numeric, skip student_id search
+                pass
+            
+            # Create list to hold all filters
+            filters = [{"$or": search_criteria}]
+            
+            # Add level filter if specified
+            if level is not None:
+                filters.append({"level": level})
+            
+            # Combine all filters
+            if len(filters) > 1:
+                search_query = {"$and": filters}
+            else:
+                search_query = filters[0]
+        else:
+            # No search query, but check for level filter
+            if level is not None:
+                search_query = {"level": level}
+            # If no filters, search_query remains empty dict (all documents)
+        
+        # Get total count with filters applied
+        total = await archived_student_collection.count_documents(search_query)
         
         # Calculate skip from page number
         skip = (page - 1) * limit
         
-        # Get archived students with pagination
-        archived = await archived_student_collection.find().skip(skip).limit(limit).to_list(length=None)
+        # Get archived students with pagination and filters (newest first by archived_at)
+        archived = await archived_student_collection.find(search_query).sort([("archived_at", -1)]).skip(skip).limit(limit).to_list(length=None)
 
         # Convert all ObjectId fields to strings recursively
         archived = [convert_objectids_to_strings(student) for student in archived]

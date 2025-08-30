@@ -1,5 +1,5 @@
-from fastapi import APIRouter, HTTPException, Depends
-from typing import List
+from fastapi import APIRouter, HTTPException, Depends, Query
+from typing import List, Optional
 from bson import ObjectId
 from datetime import datetime
 
@@ -115,18 +115,74 @@ async def remove_student_from_blacklist(
     }
 
 @router.get("/", response_model=PaginatedBlacklistStudentsResponse)
-async def get_all_blacklisted_students(page: int = 1, limit: int = 25, assistant=Depends(get_current_assistant)):
+async def get_all_blacklisted_students(
+    page: int = Query(1, ge=1, description="Page number (starts from 1)"),
+    limit: int = Query(25, ge=1, le=100, description="Number of items per page (max 100)"),
+    q: Optional[str] = Query(None, description="Search query for student name, phone number, or student ID"),
+    level: Optional[int] = Query(None, ge=1, le=3, description="Filter by student level (1, 2, or 3)"),
+    assistant=Depends(get_current_assistant)
+):
     """
-    Get all students in blacklist with pagination
+    Get all blacklisted students with optional search and filtering, plus pagination.
+    
+    Args:
+        page: Page number (starts from 1)
+        limit: Number of items per page (max 100)
+        q: Optional search query (name, phone, or student ID)
+        level: Optional filter by student level (1, 2, or 3)
     """
-    # Get total count
-    total = await BlacklistStudent.count()
+    # Build search and filter query using MongoDB syntax
+    mongo_query = {}
+    
+    # Add search functionality if q parameter is provided
+    if q:
+        # Build search criteria with multiple criteria using MongoDB $or operator
+        search_criteria = [
+            {"first_name": {"$regex": q, "$options": "i"}},
+            {"last_name": {"$regex": q, "$options": "i"}},
+            {"phone_number": {"$regex": q, "$options": "i"}},
+            {"guardian_number": {"$regex": q, "$options": "i"}}
+        ]
+        
+        # Add student_id search if query is numeric
+        try:
+            student_id_num = int(q)
+            search_criteria.append({"student_id": student_id_num})
+            search_criteria.append({"uid": student_id_num})
+        except ValueError:
+            # Query is not numeric, skip student_id search
+            pass
+        
+        # Add search criteria to query
+        if level is not None:
+            # Combine search with level filter using $and
+            mongo_query = {
+                "$and": [
+                    {"$or": search_criteria},
+                    {"level": level}
+                ]
+            }
+        else:
+            mongo_query = {"$or": search_criteria}
+    elif level is not None:
+        # Only level filter, no search
+        mongo_query = {"level": level}
+    # If no search and no level filter, mongo_query remains empty {}
+    
+    # Get total count with filters applied
+    if mongo_query:
+        total = await BlacklistStudent.find(mongo_query).count()
+    else:
+        total = await BlacklistStudent.count()
     
     # Calculate skip from page number
     skip = (page - 1) * limit
     
-    # Get blacklisted students with pagination
-    blacklisted_students = await BlacklistStudent.find_all().skip(skip).limit(limit).to_list()
+    # Get blacklisted students with pagination and filters (newest first by blacklisted_at)
+    if mongo_query:
+        blacklisted_students = await BlacklistStudent.find(mongo_query).sort(["-blacklisted_at"]).skip(skip).limit(limit).to_list()
+    else:
+        blacklisted_students = await BlacklistStudent.find_all().sort(["-blacklisted_at"]).skip(skip).limit(limit).to_list()
     
     # Convert to response objects
     students_response = [

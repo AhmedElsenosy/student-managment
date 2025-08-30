@@ -1,0 +1,23 @@
+# PDF Exam Assistant Requirements
+# Additional dependencies for PDF processing functionality
+# These are added to your existing project requirements
+
+# Core PDF processing
+pdf2image>=3.1.0
+Pillow>=10.0.0
+
+# Data processing and analysis  
+pandas>=2.0.0
+numpy>=1.24.0
+openpyxl>=3.1.0
+
+# Computer vision (if not already installed)
+opencv-python>=4.8.0
+
+# Optional: For better performance
+psutil>=5.9.0
+
+# Note: You also need to install poppler-utils system package:
+# Ubuntu/Debian: sudo apt-get install poppler-utils
+# CentOS/RHEL: sudo yum install poppler-utils
+# macOS: brew install poppler

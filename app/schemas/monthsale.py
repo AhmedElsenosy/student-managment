@@ -33,3 +33,17 @@ class PaginatedMonthSalesResponse(BaseModel):
     total_pages: int
     has_next: bool
     has_prev: bool
+
+class MonthlySalesStats(BaseModel):
+    month: str  # YYYY-MM format
+    month_name: str  # Full month name like "January 2024"
+    monthsales_count: int  # Number of unique students who made monthsales this month
+    booksales_count: int  # Number of books sold this month
+    total_monthsales_revenue: float
+    total_booksales_revenue: float
+    total_revenue: float
+
+class SalesStatisticsResponse(BaseModel):
+    statistics: List[MonthlySalesStats]
+    total_months: int
+    filters_applied: dict  # Shows what filters were used

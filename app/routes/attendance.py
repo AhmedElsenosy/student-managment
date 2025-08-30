@@ -639,3 +639,115 @@ async def make_attendance_by_uid(uid: int, assistant=Depends(get_current_assista
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to mark attendance: {str(e)}")
+
+
+@router.post("/undo-last/{uid}")
+async def undo_last_attendance(uid: int, assistant: TokenData = Depends(get_current_assistant)):
+    """
+    Undo the most recent attendance record for a student by their UID.
+    Removes the latest attendance entry completely from the student's record.
+    
+    Args:
+        uid: Student's unique identifier
+        assistant: Current authenticated assistant
+    
+    Returns:
+        Dictionary containing confirmation of undone attendance and updated statistics
+    """
+    try:
+        # Find the student by UID
+        student = await StudentModel.find_one(StudentModel.uid == uid)
+        if not student:
+            raise HTTPException(status_code=404, detail=f"Student not found with UID: {uid}")
+        
+        # Check if student has attendance records
+        if not hasattr(student, "attendance") or not isinstance(student.attendance, dict):
+            raise HTTPException(status_code=400, detail="Student has no attendance records to undo")
+        
+        attendance_records = student.attendance
+        
+        # Check if attendance dictionary is empty
+        if not attendance_records:
+            raise HTTPException(status_code=400, detail="Student has no attendance records to undo")
+        
+        # Find the most recent attendance date
+        # Convert date strings to datetime objects for proper sorting
+        valid_dates = []
+        for date_str in attendance_records.keys():
+            try:
+                date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+                valid_dates.append((date_str, date_obj))
+            except ValueError:
+                # Skip invalid date formats
+                continue
+        
+        if not valid_dates:
+            raise HTTPException(status_code=400, detail="No valid attendance dates found to undo")
+        
+        # Sort by date (most recent first) and get the latest
+        valid_dates.sort(key=lambda x: x[1], reverse=True)
+        last_date_str, last_date_obj = valid_dates[0]
+        
+        # Get the previous status before removal
+        previous_status = attendance_records[last_date_str]
+        previous_status_text = "Present" if previous_status else "Absent"
+        
+        # Remove the last attendance record
+        del student.attendance[last_date_str]
+        
+        # Save the updated student record
+        await student.save()
+        
+        # Calculate updated statistics
+        remaining_records = student.attendance
+        total_days = len(remaining_records)
+        present_days = sum(1 for status in remaining_records.values() if status)
+        absent_days = total_days - present_days
+        attendance_percentage = (present_days / total_days * 100) if total_days > 0 else 0
+        
+        # Get student's group information
+        group = await Group.find(Group.students == student.id).first_or_none()
+        group_name = group.group_name if group else "No Group"
+        
+        # Get current timestamp in Egypt timezone
+        egypt_tz = pytz.timezone("Africa/Cairo")
+        now = datetime.now(egypt_tz)
+        
+        # Get day of week for the undone date
+        day_of_week = last_date_obj.strftime("%A")
+        
+        return {
+            "success": True,
+            "message": "Last attendance successfully undone",
+            "student": {
+                "uid": uid,
+                "student_id": student.student_id,
+                "name": f"{student.first_name} {student.last_name}",
+                "first_name": student.first_name,
+                "last_name": student.last_name,
+                "level": student.level,
+                "group": group_name
+            },
+            "undone_record": {
+                "date": last_date_str,
+                "previous_status": previous_status,
+                "previous_status_text": previous_status_text,
+                "day_of_week": day_of_week
+            },
+            "updated_statistics": {
+                "total_days": total_days,
+                "present_days": present_days,
+                "absent_days": absent_days,
+                "attendance_percentage": round(attendance_percentage, 2)
+            },
+            "operation_info": {
+                "performed_by": assistant.username if hasattr(assistant, 'username') else "Assistant",
+                "timestamp": now.isoformat(),
+                "operation": "undo_last_attendance"
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to undo last attendance: {str(e)}")

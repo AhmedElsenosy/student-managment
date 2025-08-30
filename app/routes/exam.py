@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Query
 from datetime import date, datetime
-from typing import List
+from typing import List, Optional
 from pathlib import Path
 from bson import ObjectId
 import shutil
@@ -67,6 +67,7 @@ async def create_exam(
     exam_start_time: str = Form(...),
     final_degree: int = Form(...),
     solution_photo: UploadFile = File(None),  # Legacy field
+    exam_models_pdf: UploadFile = File(None),  # NEW: PDF with 3 models
     model_1_solution: UploadFile = File(None),
     model_2_solution: UploadFile = File(None), 
     model_3_solution: UploadFile = File(None),
@@ -82,38 +83,99 @@ async def create_exam(
         with open(photo_path, "wb") as f:
             shutil.copyfileobj(solution_photo.file, f)
 
-    # Handle 3 model solutions
-    models = []
-    model_files = [
-        (model_1_solution, model_1_name, 1),
-        (model_2_solution, model_2_name, 2), 
-        (model_3_solution, model_3_name, 3)
-    ]
-    
-    for model_file, model_name, model_number in model_files:
-        model_path = None
-        if model_file and hasattr(model_file, 'filename') and model_file.filename and model_file.filename.strip():
-            # Create unique filename to avoid conflicts
-            model_filename = f"model_{model_number}_{model_file.filename}"
-            model_path = f"{UPLOAD_DIR}/{model_filename}"
+    # NEW: Process PDF with 3 models if provided
+    pdf_generated_models = []
+    if exam_models_pdf and hasattr(exam_models_pdf, 'filename') and exam_models_pdf.filename:
+        try:
+            # Import PDF converter
+            import sys
+            import os
+            sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+            from pdf_converter import PDFConverter
             
-            try:
-                # Save the uploaded file
-                with open(model_path, "wb") as f:
-                    shutil.copyfileobj(model_file.file, f)
-                print(f"✅ Saved model {model_number} solution: {model_path}")
-            except Exception as e:
-                print(f"❌ Failed to save model {model_number} solution: {str(e)}")
-                model_path = None
-        else:
-            print(f"⚠️  No file uploaded for model {model_number} ({model_name})")
+            # Save uploaded PDF temporarily
+            pdf_filename = f"exam_models_{exam_name}_{exam_models_pdf.filename}"
+            temp_pdf_path = f"{UPLOAD_DIR}/{pdf_filename}"
+            
+            with open(temp_pdf_path, "wb") as f:
+                shutil.copyfileobj(exam_models_pdf.file, f)
+            
+            print(f"📄 Processing PDF: {temp_pdf_path}")
+            
+            # Convert PDF to images
+            converter = PDFConverter(dpi=300)
+            image_paths = converter.convert_pdf_to_images(temp_pdf_path, UPLOAD_DIR)
+            
+            # Take first 3 images as the 3 models
+            model_names = [model_1_name, model_2_name, model_3_name]
+            for i, image_path in enumerate(image_paths[:3]):
+                model_number = i + 1
+                model_name = model_names[i] if i < len(model_names) else f"Model {chr(65+i)}"
+                
+                # Rename image to match model convention
+                final_model_path = f"{UPLOAD_DIR}/model_{model_number}_{os.path.basename(image_path)}"
+                shutil.move(image_path, final_model_path)
+                
+                pdf_generated_models.append((final_model_path, model_name, model_number))
+                print(f"✅ Generated model {model_number} ({model_name}): {final_model_path}")
+            
+            # Clean up original PDF and any extra images
+            if os.path.exists(temp_pdf_path):
+                os.remove(temp_pdf_path)
+            for extra_image in image_paths[3:]:
+                if os.path.exists(extra_image):
+                    os.remove(extra_image)
+                    
+        except Exception as e:
+            print(f"❌ Error processing PDF: {str(e)}")
+            # Continue with normal flow if PDF processing fails
+            pass
+
+    # Handle 3 model solutions (individual files or from PDF)
+    models = []
+    
+    # If we have PDF-generated models, use those, otherwise use individual files
+    if pdf_generated_models:
+        # Use PDF-generated models
+        for model_path, model_name, model_number in pdf_generated_models:
+            from app.models.exam import ExamModelVariant
+            models.append(ExamModelVariant(
+                model_number=model_number,
+                model_name=model_name,
+                solution_photo=model_path
+            ))
+    else:
+        # Use individual uploaded files (original flow)
+        model_files = [
+            (model_1_solution, model_1_name, 1),
+            (model_2_solution, model_2_name, 2), 
+            (model_3_solution, model_3_name, 3)
+        ]
         
-        from app.models.exam import ExamModelVariant
-        models.append(ExamModelVariant(
-            model_number=model_number,
-            model_name=model_name,
-            solution_photo=model_path
-        ))
+        for model_file, model_name, model_number in model_files:
+            model_path = None
+            if model_file and hasattr(model_file, 'filename') and model_file.filename and model_file.filename.strip():
+                # Create unique filename to avoid conflicts
+                model_filename = f"model_{model_number}_{model_file.filename}"
+                model_path = f"{UPLOAD_DIR}/{model_filename}"
+                
+                try:
+                    # Save the uploaded file
+                    with open(model_path, "wb") as f:
+                        shutil.copyfileobj(model_file.file, f)
+                    print(f"✅ Saved model {model_number} solution: {model_path}")
+                except Exception as e:
+                    print(f"❌ Failed to save model {model_number} solution: {str(e)}")
+                    model_path = None
+            else:
+                print(f"⚠️  No file uploaded for model {model_number} ({model_name})")
+            
+            from app.models.exam import ExamModelVariant
+            models.append(ExamModelVariant(
+                model_number=model_number,
+                model_name=model_name,
+                solution_photo=model_path
+            ))
 
     exam_data = ExamCreate(
         exam_name=exam_name,
@@ -134,15 +196,85 @@ async def create_exam(
 
 
 @router.get("/", response_model=PaginatedExamsResponse)
-async def get_all_exams(page: int = 1, limit: int = 25, assistant=Depends(get_current_assistant)):
-    # Get total count
-    total = await exams_collection.count_documents({})
+async def get_all_exams(
+    page: int = Query(1, ge=1, description="Page number (starts from 1)"),
+    limit: int = Query(25, ge=1, le=100, description="Number of items per page (max 100)"),
+    q: Optional[str] = Query(None, description="Search query for exam name"),
+    exam_date: Optional[date] = Query(None, description="Filter exams by specific date (YYYY-MM-DD)"),
+    level: Optional[int] = Query(None, ge=1, le=3, description="Filter by exam level (1, 2, or 3)"),
+    assistant=Depends(get_current_assistant)
+):
+    """
+    Get all exams with optional search and filtering, plus pagination.
+    
+    Args:
+        page: Page number (starts from 1)
+        limit: Number of items per page (max 100)
+        q: Optional search query for exam name
+        exam_date: Optional filter by specific exam date (YYYY-MM-DD)
+        level: Optional filter by exam level (1, 2, or 3)
+    """
+    # Build search and filter query using MongoDB syntax
+    mongo_query = {}
+    query_conditions = []
+    
+    # Add search functionality if q parameter is provided
+    if q:
+        # Search by exam name (case-insensitive, partial match)
+        query_conditions.append({"exam_name": {"$regex": q, "$options": "i"}})
+    
+    # Add date filtering if provided - filter by specific date
+    if exam_date:
+        # Convert date to string format that matches database storage
+        date_str = exam_date.strftime("%Y-%m-%d")
+        print(f"🔍 Date filter: Looking for exam_date = '{date_str}'")
+        
+        # Try both string format and datetime range
+        # MongoDB can't serialize Python date objects, so we use datetime objects
+        start_of_day = datetime.combine(exam_date, datetime.min.time())
+        end_of_day = datetime.combine(exam_date, datetime.max.time())
+        
+        date_query = {
+            "$or": [
+                {"exam_date": date_str},  # String format (YYYY-MM-DD)
+                {"exam_date": {"$gte": start_of_day, "$lte": end_of_day}}  # DateTime range
+            ]
+        }
+        
+        query_conditions.append(date_query)
+    
+    # Add level filter if specified
+    if level is not None:
+        query_conditions.append({"exam_level": level})
+    
+    # Combine all conditions
+    if query_conditions:
+        if len(query_conditions) > 1:
+            mongo_query = {"$and": query_conditions}
+        else:
+            mongo_query = query_conditions[0]
+    # If no conditions, mongo_query remains empty {}
+    
+    # Debug: Print the final query
+    print(f"🔍 Final MongoDB query: {mongo_query}")
+    
+    # Get total count with filters applied
+    if mongo_query:
+        total = await exams_collection.count_documents(mongo_query)
+        print(f"🔍 Found {total} exams matching the query")
+    else:
+        total = await exams_collection.count_documents({})
+        print(f"🔍 No filters applied, total exams: {total}")
     
     # Calculate skip from page number
     skip = (page - 1) * limit
     
-    # Get exams with pagination
-    exams = await exams_collection.find().skip(skip).limit(limit).to_list(length=None)
+    # Get exams with pagination and filters (sorted by exam_date descending - newest first)
+    if mongo_query:
+        exams = await exams_collection.find(mongo_query).sort("exam_date", -1).skip(skip).limit(limit).to_list(length=None)
+    else:
+        exams = await exams_collection.find({}).sort("exam_date", -1).skip(skip).limit(limit).to_list(length=None)
+    
     students = await students_collection.find().to_list(length=None)
     
     exam_list = []
