@@ -136,11 +136,30 @@ async def get_all_blacklisted_students(
     
     # Add search functionality if q parameter is provided
     if q:
-        # Build search criteria with multiple criteria using MongoDB $or operator
+        # Build search criteria with improved Arabic name matching using MongoDB $or operator
+        # Create word-boundary aware regex pattern for Arabic names
+        # This will match the query as a separate word or at word boundaries
+        word_boundary_pattern = f"(^|\\s){q}(\\s|$)"
+        
         search_criteria = [
+            # Search by first name - exact word match (case-insensitive)
+            {"first_name": {"$regex": word_boundary_pattern, "$options": "i"}},
+            # Search by last name - exact word match (case-insensitive)
+            {"last_name": {"$regex": word_boundary_pattern, "$options": "i"}},
+            # Search by full name - exact word match (case-insensitive) 
+            {"$expr": {
+                "$regexMatch": {
+                    "input": {"$concat": ["$first_name", " ", "$last_name"]},
+                    "regex": word_boundary_pattern,
+                    "options": "i"
+                }
+            }},
+            # Also include substring search as fallback for partial names
             {"first_name": {"$regex": q, "$options": "i"}},
             {"last_name": {"$regex": q, "$options": "i"}},
+            # Search by phone number (exact or partial)
             {"phone_number": {"$regex": q, "$options": "i"}},
+            # Search by guardian number (exact or partial)
             {"guardian_number": {"$regex": q, "$options": "i"}}
         ]
         

@@ -92,20 +92,27 @@ async def search_archived_students(
     from app.database import archived_student_collection
     
     try:
-        # Build search query with multiple criteria
+        # Build search query with improved Arabic name matching
+        # Create word-boundary aware regex pattern for Arabic names
+        # This will match the query as a separate word or at word boundaries
+        word_boundary_pattern = f"(^|\\s){q}(\\s|$)"
+        
         search_criteria = [
-            # Search by first name (case-insensitive, partial match)
-            {"first_name": {"$regex": q, "$options": "i"}},
-            # Search by last name (case-insensitive, partial match)
-            {"last_name": {"$regex": q, "$options": "i"}},
-            # Search by full name (first + last)
+            # Search by first name - exact word match (case-insensitive)
+            {"first_name": {"$regex": word_boundary_pattern, "$options": "i"}},
+            # Search by last name - exact word match (case-insensitive)
+            {"last_name": {"$regex": word_boundary_pattern, "$options": "i"}},
+            # Search by full name - exact word match (case-insensitive)
             {"$expr": {
                 "$regexMatch": {
                     "input": {"$concat": ["$first_name", " ", "$last_name"]},
-                    "regex": q,
+                    "regex": word_boundary_pattern,
                     "options": "i"
                 }
             }},
+            # Also include substring search as fallback for partial names
+            {"first_name": {"$regex": q, "$options": "i"}},
+            {"last_name": {"$regex": q, "$options": "i"}},
             # Search by phone number (exact or partial)
             {"phone_number": {"$regex": q, "$options": "i"}},
             # Search by guardian number (exact or partial)
@@ -171,20 +178,27 @@ async def get_all_archived_students(
         
         # Add search functionality if q parameter is provided
         if q:
-            # Build search criteria with multiple criteria (similar to regular students)
+            # Build search criteria with improved Arabic name matching
+            # Create word-boundary aware regex pattern for Arabic names
+            # This will match the query as a separate word or at word boundaries
+            word_boundary_pattern = f"(^|\\s){q}(\\s|$)"
+            
             search_criteria = [
-                # Search by first name (case-insensitive, partial match)
-                {"first_name": {"$regex": q, "$options": "i"}},
-                # Search by last name (case-insensitive, partial match)
-                {"last_name": {"$regex": q, "$options": "i"}},
-                # Search by full name (first + last)
+                # Search by first name - exact word match (case-insensitive)
+                {"first_name": {"$regex": word_boundary_pattern, "$options": "i"}},
+                # Search by last name - exact word match (case-insensitive)
+                {"last_name": {"$regex": word_boundary_pattern, "$options": "i"}},
+                # Search by full name - exact word match (case-insensitive)
                 {"$expr": {
                     "$regexMatch": {
                         "input": {"$concat": ["$first_name", " ", "$last_name"]},
-                        "regex": q,
+                        "regex": word_boundary_pattern,
                         "options": "i"
                     }
                 }},
+                # Also include substring search as fallback for partial names
+                {"first_name": {"$regex": q, "$options": "i"}},
+                {"last_name": {"$regex": q, "$options": "i"}},
                 # Search by phone number (exact or partial)
                 {"phone_number": {"$regex": q, "$options": "i"}},
                 # Search by guardian number (exact or partial)

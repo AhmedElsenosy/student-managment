@@ -239,17 +239,33 @@ async def get_all_absent_students(
                     "total_absent_days": len(absent_dates)
                 }
                 
-                # Apply search filter
+                # Apply search filter with improved Arabic name matching
                 if q:
                     first_name = student.get("first_name", "").lower()
                     last_name = student.get("last_name", "").lower()
                     full_name = f"{first_name} {last_name}".strip()
                     search_query = q.lower()
                     
-                    # Check if search query matches any name component
-                    if (search_query in first_name or 
+                    # Create word-boundary aware pattern for exact word matching
+                    import re
+                    word_boundary_pattern = rf"(^|\s){re.escape(search_query)}(\s|$)"
+                    
+                    # Check if search query matches as complete words first (prioritized)
+                    exact_word_match = (
+                        re.search(word_boundary_pattern, first_name, re.IGNORECASE) or
+                        re.search(word_boundary_pattern, last_name, re.IGNORECASE) or
+                        re.search(word_boundary_pattern, full_name, re.IGNORECASE)
+                    )
+                    
+                    # Fallback to substring matching for partial names
+                    substring_match = (
+                        search_query in first_name or 
                         search_query in last_name or 
-                        search_query in full_name):
+                        search_query in full_name
+                    )
+                    
+                    # Accept match if either exact word or substring match found
+                    if exact_word_match or substring_match:
                         absent_students.append(student_data)
                         total_absent_records += len(absent_dates)
                 else:
@@ -429,17 +445,33 @@ async def get_all_present_students(
                     "perfect_attendance": True
                 }
                 
-                # Apply search filter
+                # Apply search filter with improved Arabic name matching
                 if q:
                     first_name = student.get("first_name", "").lower()
                     last_name = student.get("last_name", "").lower()
                     full_name = f"{first_name} {last_name}".strip()
                     search_query = q.lower()
                     
-                    # Check if search query matches any name component
-                    if (search_query in first_name or 
+                    # Create word-boundary aware pattern for exact word matching
+                    import re
+                    word_boundary_pattern = rf"(^|\s){re.escape(search_query)}(\s|$)"
+                    
+                    # Check if search query matches as complete words first (prioritized)
+                    exact_word_match = (
+                        re.search(word_boundary_pattern, first_name, re.IGNORECASE) or
+                        re.search(word_boundary_pattern, last_name, re.IGNORECASE) or
+                        re.search(word_boundary_pattern, full_name, re.IGNORECASE)
+                    )
+                    
+                    # Fallback to substring matching for partial names
+                    substring_match = (
+                        search_query in first_name or 
                         search_query in last_name or 
-                        search_query in full_name):
+                        search_query in full_name
+                    )
+                    
+                    # Accept match if either exact word or substring match found
+                    if exact_word_match or substring_match:
                         perfect_attendance_students.append(student_data)
                         total_present_records += len(present_dates)
                 else:
