@@ -23,7 +23,7 @@ WEEKDAY_MAPPING = {
 }
 
 @router.post("/mark-daily-absences")
-async def mark_daily_absences(assistant=Depends(get_current_assistant)):
+async def mark_daily_absences():
     """
     Background task endpoint to mark students as absent if they didn't attend
     on a day when their group was scheduled to meet.

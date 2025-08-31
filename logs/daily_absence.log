@@ -1,0 +1,12 @@
+[2025-08-31 11:15:01] Starting daily absence marking...
+[2025-08-31 11:15:01] HTTP Code: 401
+[2025-08-31 11:15:01] Response: {"detail":"Invalid token"}
+[2025-08-31 11:15:01] ERROR: Daily absence marking failed with HTTP code 401
+[2025-08-31 11:15:01] Finished daily absence marking
+----------------------------------------
+[2025-08-31 11:20:01] Starting daily absence marking...
+[2025-08-31 11:20:01] HTTP Code: 200
+[2025-08-31 11:20:01] Response: {"success":true,"date_processed":"2025-08-31","weekday":"Sunday","total_groups_processed":12,"total_students_marked_absent":4,"group_details":[{"group_name":"advanced class","students_in_group":0,"students_marked_absent":0},{"group_name":"advanced class","students_in_group":0,"students_marked_absent":0},{"group_name":"advanced class","students_in_group":0,"students_marked_absent":0},{"group_name":"شغاله اهي ياحمد يارضا","students_in_group":0,"students_marked_absent":0},{"group_name":"advanced class","students_in_group":0,"students_marked_absent":0},{"group_name":"welcome","students_in_group":1,"students_marked_absent":1},{"group_name":"test new","students_in_group":2,"students_marked_absent":2},{"group_name":"test hello","students_in_group":2,"students_marked_absent":1}],"message":"Successfully processed absences for 2025-08-31"}
+[2025-08-31 11:20:01] Daily absence marking completed successfully
+[2025-08-31 11:20:01] Finished daily absence marking
+----------------------------------------

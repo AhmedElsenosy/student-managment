@@ -665,7 +665,10 @@ async def delete_student(student_id: int, request: Request):
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Student not found")
 
-    # Notify fingerprint backend with auth headers
+    # Try to notify fingerprint backend with auth headers
+    fingerprint_deletion_success = False
+    fingerprint_error_message = None
+    
     try:
         # Get auth token from request headers
         token = request.headers.get("authorization")
@@ -677,10 +680,17 @@ async def delete_student(student_id: int, request: Request):
                 headers=headers
             )
             response.raise_for_status()
+            fingerprint_deletion_success = True
     except httpx.HTTPError as e:
-        raise HTTPException(status_code=500, detail=f"Student deleted from DB, but failed to remove from fingerprint device: {str(e)}")
+        fingerprint_error_message = str(e)
+    except Exception as e:
+        fingerprint_error_message = str(e)
 
-    return {"message": "Student deleted from DB and fingerprint device"}
+    # Always return 200 status code since the student was successfully deleted from DB
+    if fingerprint_deletion_success:
+        return {"message": "Student deleted from DB and fingerprint device"}
+    else:
+        return {"message": f"Student deleted from DB, but failed to remove from fingerprint device: {fingerprint_error_message}"}
 
 @router.post("/{student_id}/archive")
 async def archive_student_endpoint(student_id: int, request: ArchiveRequest = ArchiveRequest()):
