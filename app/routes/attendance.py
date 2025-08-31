@@ -521,6 +521,163 @@ async def get_all_present_students(
         raise HTTPException(status_code=500, detail=f"Error retrieving perfect attendance students: {str(e)}")
 
 
+@router.get("/analytics")
+async def get_attendance_analytics(assistant=Depends(get_current_assistant)):
+    """
+    Comprehensive attendance analytics showing:
+    - Total student count
+    - Overall present/absent counts and percentages (all time)
+    - Breakdown by level with counts and percentages
+    - Performance insights
+    """
+    try:
+        # Get all students with attendance records
+        students_cursor = student_collection.find({
+            "attendance": {"$exists": True, "$ne": {}}
+        })
+        
+        # Get total student count (all students in database)
+        total_students_in_db = await student_collection.count_documents({})
+        
+        # Initialize counters
+        total_attendance_records = 0
+        total_present_records = 0
+        total_absent_records = 0
+        students_with_attendance = 0
+        
+        # Level-specific counters
+        level_stats = {
+            1: {"students": 0, "total_records": 0, "present": 0, "absent": 0},
+            2: {"students": 0, "total_records": 0, "present": 0, "absent": 0},
+            3: {"students": 0, "total_records": 0, "present": 0, "absent": 0}
+        }
+        
+        # Process each student
+        async for student in students_cursor:
+            student_level = student.get("level")
+            attendance_records = student.get("attendance", {})
+            
+            if attendance_records:
+                students_with_attendance += 1
+                
+                # Count present and absent for this student
+                student_present = 0
+                student_absent = 0
+                
+                for date_str, status in attendance_records.items():
+                    total_attendance_records += 1
+                    if status is True:
+                        student_present += 1
+                        total_present_records += 1
+                    elif status is False:
+                        student_absent += 1
+                        total_absent_records += 1
+                
+                # Update level statistics
+                if student_level in level_stats:
+                    level_stats[student_level]["students"] += 1
+                    level_stats[student_level]["total_records"] += len(attendance_records)
+                    level_stats[student_level]["present"] += student_present
+                    level_stats[student_level]["absent"] += student_absent
+        
+        # Calculate overall percentages
+        overall_present_percentage = (total_present_records / total_attendance_records * 100) if total_attendance_records > 0 else 0
+        overall_absent_percentage = (total_absent_records / total_attendance_records * 100) if total_attendance_records > 0 else 0
+        
+        # Calculate level-specific percentages
+        level_breakdown = []
+        for level, stats in level_stats.items():
+            level_total_records = stats["total_records"]
+            level_present_percentage = (stats["present"] / level_total_records * 100) if level_total_records > 0 else 0
+            level_absent_percentage = (stats["absent"] / level_total_records * 100) if level_total_records > 0 else 0
+            
+            level_breakdown.append({
+                "level": level,
+                "students_with_attendance": stats["students"],
+                "total_attendance_records": level_total_records,
+                "present_records": stats["present"],
+                "absent_records": stats["absent"],
+                "present_percentage": round(level_present_percentage, 2),
+                "absent_percentage": round(level_absent_percentage, 2),
+                "attendance_health": (
+                    "Excellent" if level_present_percentage >= 95 else
+                    "Very Good" if level_present_percentage >= 90 else
+                    "Good" if level_present_percentage >= 85 else
+                    "Fair" if level_present_percentage >= 80 else
+                    "Poor" if level_present_percentage >= 70 else
+                    "Critical"
+                )
+            })
+        
+        # Calculate additional insights
+        avg_records_per_student = total_attendance_records / students_with_attendance if students_with_attendance > 0 else 0
+        students_without_attendance = total_students_in_db - students_with_attendance
+        
+        # Find best and worst performing levels
+        sorted_levels = sorted(level_breakdown, key=lambda x: x["present_percentage"], reverse=True)
+        best_level = sorted_levels[0] if sorted_levels else None
+        worst_level = sorted_levels[-1] if sorted_levels else None
+        
+        return {
+            "success": True,
+            "overall_summary": {
+                "total_students_in_database": total_students_in_db,
+                "students_with_attendance_records": students_with_attendance,
+                "students_without_attendance_records": students_without_attendance,
+                "total_attendance_records": total_attendance_records,
+                "total_present_records": total_present_records,
+                "total_absent_records": total_absent_records,
+                "overall_present_percentage": round(overall_present_percentage, 2),
+                "overall_absent_percentage": round(overall_absent_percentage, 2)
+            },
+            "level_breakdown": level_breakdown,
+            "performance_insights": {
+                "best_performing_level": {
+                    "level": best_level["level"],
+                    "present_percentage": best_level["present_percentage"],
+                    "health_status": best_level["attendance_health"]
+                } if best_level else None,
+                "worst_performing_level": {
+                    "level": worst_level["level"],
+                    "present_percentage": worst_level["present_percentage"],
+                    "health_status": worst_level["attendance_health"]
+                } if worst_level else None,
+                "overall_attendance_health": (
+                    "Excellent" if overall_present_percentage >= 95 else
+                    "Very Good" if overall_present_percentage >= 90 else
+                    "Good" if overall_present_percentage >= 85 else
+                    "Fair" if overall_present_percentage >= 80 else
+                    "Poor" if overall_present_percentage >= 70 else
+                    "Critical"
+                ),
+                "average_records_per_student": round(avg_records_per_student, 2),
+                "attendance_coverage_percentage": round((students_with_attendance / total_students_in_db * 100), 2) if total_students_in_db > 0 else 0
+            },
+            "recommendations": {
+                "focus_areas": [
+                    f"Level {worst_level['level']} needs attention (only {worst_level['present_percentage']:.1f}% attendance)"
+                    if worst_level and worst_level["present_percentage"] < 85 else None,
+                    f"{students_without_attendance} students have no attendance records - consider initial attendance marking"
+                    if students_without_attendance > 0 else None,
+                    "Overall attendance is critical - immediate intervention needed"
+                    if overall_present_percentage < 70 else None
+                ],
+                "positive_highlights": [
+                    f"Level {best_level['level']} shows excellent attendance ({best_level['present_percentage']:.1f}%)"
+                    if best_level and best_level["present_percentage"] >= 90 else None,
+                    "Overall attendance is excellent - keep up the good work!"
+                    if overall_present_percentage >= 95 else
+                    "Overall attendance is good - minor improvements needed"
+                    if overall_present_percentage >= 85 else None
+                ]
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error calculating attendance analytics: {str(e)}")
+
+
 @router.get("/absent/{student_id}")
 async def get_student_absent_records(student_id: str, assistant=Depends(get_current_assistant)):
     """
