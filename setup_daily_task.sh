@@ -112,9 +112,10 @@ echo "• Otherwise: $(date -d "tomorrow 23:59" '+%Y-%m-%d %H:%M:%S')"
 echo ""
 
 echo -e "${YELLOW}💡 Want to test right now?${NC}"
-read -p "Run the daily absence task immediately? (y/n): " -n 1 -r
+printf "Run the daily absence task immediately? (y/n): "
+read REPLY
 echo ""
-if [[ $REPLY =~ ^[Yy]$ ]]; then
+if [ "$REPLY" = "y" ] || [ "$REPLY" = "Y" ]; then
     echo ""
     echo -e "${BLUE}🧪 Running test...${NC}"
     echo "==================="
