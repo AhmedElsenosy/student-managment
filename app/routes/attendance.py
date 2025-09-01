@@ -124,6 +124,7 @@ async def get_all_absent_students(
 ):
     """
     Get all students who have absent records (attendance = False) and their absent dates
+    🚀 OPTIMIZED: Uses database-level filtering and indexes for maximum performance
     
     Args:
         page: Page number (1-based, default: 1)
@@ -142,20 +143,31 @@ async def get_all_absent_students(
         if limit < 1:
             raise HTTPException(status_code=400, detail="Limit must be >= 1")
         
-        # Find all students who have attendance records using direct MongoDB access
-        students_cursor = student_collection.find({
+        # 🚀 BUILD OPTIMIZED DATABASE QUERY
+        query_filter = {
             "attendance": {"$exists": True, "$ne": {}}
-        })
+        }
         
-        absent_students = []
-        total_absent_records = 0
+        # Add level filter to database query (uses attendance_level_index)
+        if level is not None:
+            query_filter["level"] = level
         
-        # Get group filter constraint if provided
+        # Add name search filter to database query (uses attendance_name_index or name_text_index)
+        if q:
+            # Use regex for partial matching (optimized with indexes)
+            name_pattern = {"$regex": q, "$options": "i"}
+            query_filter["$or"] = [
+                {"first_name": name_pattern},
+                {"last_name": name_pattern}
+            ]
+        
+        # Get group filter constraint if provided (uses groups_name_index)
         group_student_ids = None
         if group_name:
             group = await Group.find_one(Group.group_name == group_name)
             if group:
-                group_student_ids = set(str(student_id) for student_id in group.students)
+                # Add group filter to database query
+                query_filter["_id"] = {"$in": group.students}
             else:
                 # Group not found, return empty result
                 return {
@@ -182,16 +194,21 @@ async def get_all_absent_students(
                     },
                     "message": f"Group '{group_name}' not found"
                 }
-
+        
+        # 🚀 EXECUTE OPTIMIZED DATABASE QUERY
+        students_cursor = student_collection.find(query_filter)
+        
+        absent_students = []
+        total_absent_records = 0
+        
+        # Pre-fetch groups for efficient lookups
+        groups_by_student = {}
+        all_groups = await Group.find_all().to_list()
+        for group in all_groups:
+            for student_id in group.students:
+                groups_by_student[student_id] = group.group_name
+        
         async for student in students_cursor:
-            # Apply level filter
-            if level is not None and student.get("level") != level:
-                continue
-                
-            # Apply group filter
-            if group_student_ids is not None and str(student["_id"]) not in group_student_ids:
-                continue
-            
             attendance_records = student.get("attendance", {})
             
             # Find all absent dates (where attendance = False)
@@ -212,17 +229,8 @@ async def get_all_absent_students(
                 # Sort absent dates by date (most recent first)
                 absent_dates.sort(key=lambda x: x["date"], reverse=True)
                 
-                # Get student's group name
-                group_name_value = None
-                try:
-                    student_obj = await StudentModel.find_one(StudentModel.id == PyObjectId(str(student["_id"])))
-                    if student_obj:
-                        group = await Group.find(Group.students == student_obj.id).first_or_none()
-                        if group:
-                            group_name_value = group.group_name
-                except Exception:
-                    # If group lookup fails, continue without group name
-                    pass
+                # Get student's group name from pre-fetched mapping
+                group_name_value = groups_by_student.get(ObjectId(student["_id"]))
                 
                 student_data = {
                     "student_info": {
@@ -239,38 +247,8 @@ async def get_all_absent_students(
                     "total_absent_days": len(absent_dates)
                 }
                 
-                # Apply search filter with improved Arabic name matching
-                if q:
-                    first_name = student.get("first_name", "").lower()
-                    last_name = student.get("last_name", "").lower()
-                    full_name = f"{first_name} {last_name}".strip()
-                    search_query = q.lower()
-                    
-                    # Create word-boundary aware pattern for exact word matching
-                    import re
-                    word_boundary_pattern = rf"(^|\s){re.escape(search_query)}(\s|$)"
-                    
-                    # Check if search query matches as complete words first (prioritized)
-                    exact_word_match = (
-                        re.search(word_boundary_pattern, first_name, re.IGNORECASE) or
-                        re.search(word_boundary_pattern, last_name, re.IGNORECASE) or
-                        re.search(word_boundary_pattern, full_name, re.IGNORECASE)
-                    )
-                    
-                    # Fallback to substring matching for partial names
-                    substring_match = (
-                        search_query in first_name or 
-                        search_query in last_name or 
-                        search_query in full_name
-                    )
-                    
-                    # Accept match if either exact word or substring match found
-                    if exact_word_match or substring_match:
-                        absent_students.append(student_data)
-                        total_absent_records += len(absent_dates)
-                else:
-                    absent_students.append(student_data)
-                    total_absent_records += len(absent_dates)
+                absent_students.append(student_data)
+                total_absent_records += len(absent_dates)
         
         # Sort students by number of absent days (descending), then by name
         absent_students.sort(key=lambda x: (-x["total_absent_days"], x["student_info"]["first_name"] or "", x["student_info"]["last_name"] or ""))
@@ -325,6 +303,7 @@ async def get_all_present_students(
     """
     Get all students who have only present attendance records (no absent records)
     Perfect attendance students - those who have never been marked absent
+    🚀 OPTIMIZED: Uses database-level filtering and indexes for maximum performance
     
     Args:
         page: Page number (1-based, default: 1)
@@ -343,20 +322,30 @@ async def get_all_present_students(
         if limit < 1:
             raise HTTPException(status_code=400, detail="Limit must be >= 1")
         
-        # Find all students who have attendance records using direct MongoDB access
-        students_cursor = student_collection.find({
+        # 🚀 BUILD OPTIMIZED DATABASE QUERY
+        query_filter = {
             "attendance": {"$exists": True, "$ne": {}}
-        })
+        }
         
-        perfect_attendance_students = []
-        total_present_records = 0
+        # Add level filter to database query (uses attendance_level_index)
+        if level is not None:
+            query_filter["level"] = level
         
-        # Get group filter constraint if provided
-        group_student_ids = None
+        # Add name search filter to database query (uses attendance_name_index or name_text_index)
+        if q:
+            # Use regex for partial matching (optimized with indexes)
+            name_pattern = {"$regex": q, "$options": "i"}
+            query_filter["$or"] = [
+                {"first_name": name_pattern},
+                {"last_name": name_pattern}
+            ]
+        
+        # Get group filter constraint if provided (uses groups_name_index)
         if group_name:
             group = await Group.find_one(Group.group_name == group_name)
             if group:
-                group_student_ids = set(str(student_id) for student_id in group.students)
+                # Add group filter to database query
+                query_filter["_id"] = {"$in": group.students}
             else:
                 # Group not found, return empty result
                 return {
@@ -385,15 +374,20 @@ async def get_all_present_students(
                     "message": f"Group '{group_name}' not found"
                 }
         
+        # 🚀 EXECUTE OPTIMIZED DATABASE QUERY
+        students_cursor = student_collection.find(query_filter)
+        
+        perfect_attendance_students = []
+        total_present_records = 0
+        
+        # Pre-fetch groups for efficient lookups
+        groups_by_student = {}
+        all_groups = await Group.find_all().to_list()
+        for group in all_groups:
+            for student_id in group.students:
+                groups_by_student[student_id] = group.group_name
+        
         async for student in students_cursor:
-            # Apply level filter
-            if level is not None and student.get("level") != level:
-                continue
-                
-            # Apply group filter
-            if group_student_ids is not None and str(student["_id"]) not in group_student_ids:
-                continue
-            
             attendance_records = student.get("attendance", {})
             
             # Check if student has any absent records (False values)
@@ -417,17 +411,8 @@ async def get_all_present_students(
                 # Sort present dates by date (most recent first)
                 present_dates.sort(key=lambda x: x["date"], reverse=True)
                 
-                # Get student's group name
-                group_name_value = None
-                try:
-                    student_obj = await StudentModel.find_one(StudentModel.id == PyObjectId(str(student["_id"])))
-                    if student_obj:
-                        group = await Group.find(Group.students == student_obj.id).first_or_none()
-                        if group:
-                            group_name_value = group.group_name
-                except Exception:
-                    # If group lookup fails, continue without group name
-                    pass
+                # Get student's group name from pre-fetched mapping
+                group_name_value = groups_by_student.get(ObjectId(student["_id"]))
                 
                 student_data = {
                     "student_info": {
@@ -445,38 +430,8 @@ async def get_all_present_students(
                     "perfect_attendance": True
                 }
                 
-                # Apply search filter with improved Arabic name matching
-                if q:
-                    first_name = student.get("first_name", "").lower()
-                    last_name = student.get("last_name", "").lower()
-                    full_name = f"{first_name} {last_name}".strip()
-                    search_query = q.lower()
-                    
-                    # Create word-boundary aware pattern for exact word matching
-                    import re
-                    word_boundary_pattern = rf"(^|\s){re.escape(search_query)}(\s|$)"
-                    
-                    # Check if search query matches as complete words first (prioritized)
-                    exact_word_match = (
-                        re.search(word_boundary_pattern, first_name, re.IGNORECASE) or
-                        re.search(word_boundary_pattern, last_name, re.IGNORECASE) or
-                        re.search(word_boundary_pattern, full_name, re.IGNORECASE)
-                    )
-                    
-                    # Fallback to substring matching for partial names
-                    substring_match = (
-                        search_query in first_name or 
-                        search_query in last_name or 
-                        search_query in full_name
-                    )
-                    
-                    # Accept match if either exact word or substring match found
-                    if exact_word_match or substring_match:
-                        perfect_attendance_students.append(student_data)
-                        total_present_records += len(present_dates)
-                else:
-                    perfect_attendance_students.append(student_data)
-                    total_present_records += len(present_dates)
+                perfect_attendance_students.append(student_data)
+                total_present_records += len(present_dates)
         
         # Sort students by number of present days (descending), then by name
         perfect_attendance_students.sort(key=lambda x: (-x["total_present_days"], x["student_info"]["first_name"] or "", x["student_info"]["last_name"] or ""))

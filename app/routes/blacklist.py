@@ -136,32 +136,38 @@ async def get_all_blacklisted_students(
     
     # Add search functionality if q parameter is provided
     if q:
-        # Build search criteria with improved Arabic name matching using MongoDB $or operator
-        # Create word-boundary aware regex pattern for Arabic names
-        # This will match the query as a separate word or at word boundaries
-        word_boundary_pattern = f"(^|\\s){q}(\\s|$)"
+        # Handle full name search by splitting the search term for better matching
+        search_terms = q.strip().split()
+        search_criteria = []
         
-        search_criteria = [
-            # Search by first name - exact word match (case-insensitive)
-            {"first_name": {"$regex": word_boundary_pattern, "$options": "i"}},
-            # Search by last name - exact word match (case-insensitive)
-            {"last_name": {"$regex": word_boundary_pattern, "$options": "i"}},
-            # Search by full name - exact word match (case-insensitive) 
-            {"$expr": {
-                "$regexMatch": {
-                    "input": {"$concat": ["$first_name", " ", "$last_name"]},
-                    "regex": word_boundary_pattern,
-                    "options": "i"
-                }
-            }},
-            # Also include substring search as fallback for partial names
-            {"first_name": {"$regex": q, "$options": "i"}},
-            {"last_name": {"$regex": q, "$options": "i"}},
-            # Search by phone number (exact or partial)
-            {"phone_number": {"$regex": q, "$options": "i"}},
-            # Search by guardian number (exact or partial)
-            {"guardian_number": {"$regex": q, "$options": "i"}}
-        ]
+        if len(search_terms) == 1:
+            # Single term - search in both first and last name
+            single_term = search_terms[0]
+            search_criteria.extend([
+                {"first_name": {"$regex": single_term, "$options": "i"}},
+                {"last_name": {"$regex": single_term, "$options": "i"}},
+                # Search by phone number (exact or partial)
+                {"phone_number": {"$regex": single_term, "$options": "i"}},
+                # Search by guardian number (exact or partial)
+                {"guardian_number": {"$regex": single_term, "$options": "i"}}
+            ])
+        else:
+            # Multiple terms - try different combinations for full name matching
+            for term in search_terms:
+                search_criteria.extend([
+                    {"first_name": {"$regex": term, "$options": "i"}},
+                    {"last_name": {"$regex": term, "$options": "i"}}
+                ])
+            
+            # Also search for the full term in first or last name
+            search_criteria.extend([
+                {"first_name": {"$regex": q, "$options": "i"}},
+                {"last_name": {"$regex": q, "$options": "i"}},
+                # Search by phone number (exact or partial)
+                {"phone_number": {"$regex": q, "$options": "i"}},
+                # Search by guardian number (exact or partial)
+                {"guardian_number": {"$regex": q, "$options": "i"}}
+            ])
         
         # Add student_id search if query is numeric
         try:

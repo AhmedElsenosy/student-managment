@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from bson import ObjectId
 from pydantic_core import core_schema
 from pydantic import GetCoreSchemaHandler
+from pymongo import IndexModel, ASCENDING
 
 
 
@@ -48,3 +49,33 @@ class Group(Document):
 
     class Settings:
         name = "groups"
+        indexes = [
+            # Index on group_name for fast group lookups by name (attendance optimized)
+            IndexModel(
+                [("group_name", ASCENDING)],
+                name="groups_name_index"
+            ),
+            # Index on students array for fast membership lookups
+            IndexModel(
+                [("students", ASCENDING)],
+                name="groups_students_index"
+            ),
+            # Index on level for filtering groups by level
+            IndexModel(
+                [("level", ASCENDING)],
+                name="groups_level_index"
+            ),
+            # Compound index for level and group name
+            IndexModel(
+                [("level", ASCENDING), ("group_name", ASCENDING)],
+                name="groups_level_name_compound_index"
+            ),
+            # ========================================
+            # ATTENDANCE ENDPOINT OPTIMIZATION INDEXES
+            # ========================================
+            # Compound index for students array + level (optimizes group filtering in attendance)
+            IndexModel(
+                [("students", ASCENDING), ("level", ASCENDING)],
+                name="students_level_compound_index"
+            )
+        ]

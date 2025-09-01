@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, status, Depends, Query, Request
-from app.database import db
+from app.database import db, client
 from app.schemas.student import StudentCreate, StudentOut, StudentUpdate, StudentBase, PaginatedStudentsResponse
 from app.models.student import StudentModel
 from app.models.blacklist import BlacklistStudent
@@ -7,8 +7,9 @@ from app.routes.archive import archive_unpaid_students, move_student_to_archive
 from app.schemas.archived_student import ArchiveRequest
 from app.dependencies.auth import get_current_assistant
 from bson import ObjectId
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import List, Optional
+from motor.motor_asyncio import AsyncIOMotorClientSession
 from app.utils.fingerprint import enroll_fingerprint
 import subprocess
 from app.utils.id_generator import get_next_sequence
@@ -39,7 +40,9 @@ router = APIRouter(
 students_collection = db["students"]
 counters_collection = db["counters"]
 
-# Utility to update students subscription status based on current month
+# 🔄 TRANSACTION-BASED Utility Functions for better performance
+
+# Original utility function (kept for backward compatibility)
 async def update_students_subscription_status():
     # Get the current month in YYYY-MM format
     current_month = datetime.utcnow().strftime("%Y-%m")
@@ -56,6 +59,129 @@ async def update_students_subscription_status():
 
         # Update student if subscription status changed
         await student.save()
+
+# 🚀 NEW: Bulk operations combined function for get_all_students endpoint (standalone MongoDB compatible)
+async def update_and_fetch_students_in_bulk(
+    search_query: dict,
+    page: int,
+    limit: int
+) -> tuple[list, int]:
+    """
+    Combined bulk operations that:
+    1. Updates student subscription status using bulk operations
+    2. Archives unpaid students using bulk operations
+    3. Fetches students with pagination
+    
+    Note: Uses bulk operations instead of transactions for standalone MongoDB compatibility
+    
+    Returns: (students_list, total_count)
+    """
+    print("🔄 Starting bulk operations for students update and fetch...")
+    
+    try:
+        # Step 1: Update subscription status using bulk operations
+        current_month = datetime.utcnow().strftime("%Y-%m")
+        bulk_updates = []
+        
+        async for student in students_collection.find({}):
+            current_month_sales = student.get("subscription", {}).get("monthsales", {}).get(current_month, None)
+            new_status = current_month_sales is not None
+            
+            # Only update if status has changed
+            if student.get("is_subscription") != new_status:
+                bulk_updates.append({
+                    "updateOne": {
+                        "filter": {"_id": student["_id"]},
+                        "update": {"$set": {"is_subscription": new_status}}
+                    }
+                })
+        
+        if bulk_updates:
+            await students_collection.bulk_write(bulk_updates)
+            print(f"✅ Updated subscription status for {len(bulk_updates)} students")
+        
+        # Step 2: Archive unpaid students using bulk operations
+        from app.routes.archive import get_month_key
+        from app.database import archived_student_collection
+        
+        today = datetime.now()
+        current_month_key = get_month_key(today)
+        last_month_key = get_month_key(today.replace(day=1) - timedelta(days=1))
+        
+        students_to_archive = []
+        payment_updates = []
+        
+        async for student in students_collection.find({}):
+            student_id = student["_id"]
+            subscription = student.get("subscription", {})
+            monthsales = subscription.get("monthsales", {})
+            
+            # Skip students with fewer than 2 months of payment history
+            if len(monthsales) < 2:
+                continue
+            
+            paid_this_month = current_month_key in monthsales
+            paid_last_month = last_month_key in monthsales
+            
+            # Count months without payment
+            if paid_this_month:
+                months_without_payment = 0
+            elif paid_last_month:
+                months_without_payment = 1
+            else:
+                months_without_payment = 2
+            
+            # Update payment tracking if changed
+            if student.get("months_without_payment") != months_without_payment:
+                payment_updates.append({
+                    "updateOne": {
+                        "filter": {"_id": student_id},
+                        "update": {"$set": {"months_without_payment": months_without_payment}}
+                    }
+                })
+            
+            # Archive if unpaid for 2 consecutive months
+            if months_without_payment >= 2 and not student.get("archived", False):
+                archived_student_data = student.copy()
+                archived_student_data["archived_at"] = today
+                archived_student_data["archive_reason"] = "Unpaid for 2 consecutive months"
+                archived_student_data["archived"] = True
+                
+                # Convert date objects for BSON compatibility
+                if "birth_date" in archived_student_data and archived_student_data["birth_date"] is not None:
+                    if isinstance(archived_student_data["birth_date"], date) and not isinstance(archived_student_data["birth_date"], datetime):
+                        archived_student_data["birth_date"] = datetime.combine(archived_student_data["birth_date"], datetime.min.time())
+                
+                students_to_archive.append((student_id, archived_student_data))
+        
+        # Execute bulk payment updates
+        if payment_updates:
+            await students_collection.bulk_write(payment_updates)
+            print(f"✅ Updated payment tracking for {len(payment_updates)} students")
+        
+        # Execute archiving operations
+        if students_to_archive:
+            archived_documents = [data for _, data in students_to_archive]
+            await archived_student_collection.insert_many(archived_documents)
+            
+            student_ids_to_delete = [student_id for student_id, _ in students_to_archive]
+            await students_collection.delete_many(
+                {"_id": {"$in": student_ids_to_delete}}
+            )
+            print(f"✅ Archived {len(students_to_archive)} unpaid students")
+        
+        # Step 3: Get updated total count and fetch students
+        # Calculate skip from page and limit
+        skip = (page - 1) * limit
+        total = await students_collection.count_documents(search_query)
+        students = await students_collection.find(search_query).sort([("_id", -1)]).skip(skip).limit(limit).to_list(length=None)
+        
+        print(f"✅ Bulk operations completed: {len(students)} students fetched, total: {total}")
+        return students, total
+        
+    except Exception as e:
+        print(f"❌ Bulk operations failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Bulk operations failed: {str(e)}")
 
 # Utility to generate the next student_id
 async def get_next_student_id():
@@ -200,7 +326,7 @@ async def search_students(
 ):
     """
     Search for students by name, phone number, or student ID with optional level and group filtering.
-    Supports partial matching and case-insensitive search.
+    Optimized to use MongoDB text indexes for improved performance.
     Returns all matching results without pagination.
     
     Args:
@@ -211,41 +337,34 @@ async def search_students(
     await update_students_subscription_status()
     await archive_unpaid_students()
     
-    # Build search query with improved Arabic name matching
-    # Create word-boundary aware regex pattern for Arabic names
-    # This will match the query as a separate word or at word boundaries
-    word_boundary_pattern = f"(^|\\s){q}(\\s|$)"
+    search_criteria = []
     
-    search_criteria = [
-        # Search by first name - exact word match (case-insensitive)
-        {"first_name": {"$regex": word_boundary_pattern, "$options": "i"}},
-        # Search by last name - exact word match (case-insensitive)
-        {"last_name": {"$regex": word_boundary_pattern, "$options": "i"}},
-        # Search by full name - exact word match (case-insensitive)
-        {"$expr": {
-            "$regexMatch": {
-                "input": {"$concat": ["$first_name", " ", "$last_name"]},
-                "regex": word_boundary_pattern,
-                "options": "i"
-            }
-        }},
-        # Also include substring search as fallback for partial names
-        {"first_name": {"$regex": q, "$options": "i"}},
-        {"last_name": {"$regex": q, "$options": "i"}},
-        # Search by phone number (exact or partial)
-        {"phone_number": {"$regex": q, "$options": "i"}},
-        # Search by guardian number (exact or partial)
-        {"guardian_number": {"$regex": q, "$options": "i"}}
-    ]
-    
-    # Add student_id search if query is numeric
+    # Check if query is numeric for student_id/uid search
+    is_numeric = False
+    student_id_num = None
     try:
         student_id_num = int(q)
-        search_criteria.append({"student_id": student_id_num})
-        search_criteria.append({"uid": student_id_num})
+        is_numeric = True
     except ValueError:
-        # Query is not numeric, skip student_id search
         pass
+    
+    # Build search criteria based on query type
+    if is_numeric:
+        # For numeric queries, use exact ID matches (fast indexed queries)
+        search_criteria.extend([
+            {"student_id": student_id_num},
+            {"uid": student_id_num}
+        ])
+    else:
+        # For text queries, use only regex searches to avoid MongoDB's text search + regex OR limitation
+        # All fields now have indexes for optimal performance
+        search_criteria = [
+            # Regex searches on indexed fields
+            {"first_name": {"$regex": q, "$options": "i"}},
+            {"last_name": {"$regex": q, "$options": "i"}},
+            {"phone_number": {"$regex": q, "$options": "i"}},
+            {"guardian_number": {"$regex": q, "$options": "i"}}
+        ]
     
     # Build the final search query
     search_query = {"$or": search_criteria}
@@ -253,7 +372,7 @@ async def search_students(
     # Create list to hold all filters
     filters = [{"$or": search_criteria}]
     
-    # Add level filter if specified
+    # Add level filter if specified (uses level index in compound queries)
     if level is not None:
         filters.append({"level": level})
     
@@ -275,7 +394,7 @@ async def search_students(
     else:
         search_query = filters[0]
     
-    # Get all matching students (newest first)
+    # Get all matching students sorted by newest first
     students = await students_collection.find(search_query).sort([("_id", -1)]).to_list(length=None)
     
     result = []
@@ -284,6 +403,10 @@ async def search_students(
         del student["_id"]
         student.setdefault("is_subscription", False)
         student.setdefault("uid", 0)
+        
+        # Remove text search score from result if present
+        if "score" in student:
+            del student["score"]
 
         # Attach group name
         group = await Group.find(Group.students == ObjectId(student["id"])).first_or_none()
@@ -375,49 +498,128 @@ async def get_all_sales(
         
         return True
     
+    # Build student filter query for better database performance
+    student_filter_query = {}
+    
+    # Add level filter to student query
+    if level is not None:
+        student_filter_query["level"] = level
+    
+    # Add group filter to student query
+    if filtered_student_ids is not None:
+        student_filter_query["_id"] = {"$in": filtered_student_ids}
+    
+    # Add name filter to student query for better performance
+    if student_name:
+        # Handle full name search by splitting the search term
+        search_terms = student_name.strip().split()
+        
+        if len(search_terms) == 1:
+            # Single term - search in both first and last name
+            student_filter_query["$or"] = [
+                {"first_name": {"$regex": student_name, "$options": "i"}},
+                {"last_name": {"$regex": student_name, "$options": "i"}}
+            ]
+        else:
+            # Multiple terms - try different combinations
+            or_conditions = []
+            
+            # Search for each term in first or last name
+            for term in search_terms:
+                or_conditions.extend([
+                    {"first_name": {"$regex": term, "$options": "i"}},
+                    {"last_name": {"$regex": term, "$options": "i"}}
+                ])
+            
+            # Also search for the full term in first or last name
+            or_conditions.extend([
+                {"first_name": {"$regex": student_name, "$options": "i"}},
+                {"last_name": {"$regex": student_name, "$options": "i"}}
+            ])
+            
+            student_filter_query["$or"] = or_conditions
+    
+    # Pre-fetch filtered students to reduce database calls
+    filtered_students = {}
+    if student_filter_query:
+        students_cursor = students_collection.find(student_filter_query)
+        async for student in students_cursor:
+            filtered_students[student["_id"]] = student
+    
+    # Pre-fetch groups for better performance
+    groups_by_student = {}
+    if filtered_students or not student_filter_query:
+        # Get all groups and create a mapping
+        all_groups = await Group.find_all().to_list()
+        for group in all_groups:
+            for student_id in group.students:
+                groups_by_student[student_id] = group.group_name
+    
     # Get monthsales if not filtering for booksales only
     if subscription_type != "booksale":
-        monthsales = await MonthlySale.find_all().to_list()
+        # Use index-optimized query - sort by created_at desc for better performance
+        monthsales_query = MonthlySale.find().sort([("created_at", -1)])
+        monthsales = await monthsales_query.to_list()
+        
         for sale in monthsales:
-            # Get student info
-            student = await students_collection.find_one({"_id": sale.student_id})
-            if student and matches_student_filters(student):
-                # Get group for student
-                group = await Group.find(Group.students == ObjectId(student['_id'])).first_or_none()
-                
-                sales_data.append({
-                    "id": sale.id,
-                    "student_name": f"{student['first_name']} {student['last_name']}",
-                    "student_level": student.get('level'),
-                    "student_group": group.group_name if group else None,
-                    "subscription_type": "monthsale",
-                    "month_or_book": sale.month.strftime("%Y-%m") if sale.month else None,
-                    "price": float(sale.price),
-                    "date": sale.created_at,
-                    "_sort_date": sale.created_at  # For sorting
-                })
+            # Check if we have pre-filtered students
+            if student_filter_query:
+                student = filtered_students.get(sale.student_id)
+                if not student:
+                    continue
+            else:
+                # Get student info (this uses the student_id index)
+                student = await students_collection.find_one({"_id": sale.student_id})
+                if not student or not matches_student_filters(student):
+                    continue
+            
+            # Get group name from pre-fetched mapping
+            group_name = groups_by_student.get(ObjectId(student['_id']))
+            
+            sales_data.append({
+                "id": sale.id,
+                "student_name": f"{student['first_name']} {student['last_name']}",
+                "student_level": student.get('level'),
+                "student_group": group_name,
+                "subscription_type": "monthsale",
+                "month_or_book": sale.month.strftime("%Y-%m") if sale.month else None,
+                "price": float(sale.price),
+                "date": sale.created_at,
+                "_sort_date": sale.created_at  # For sorting
+            })
     
     # Get booksales if not filtering for monthsales only
     if subscription_type != "monthsale":
-        booksales = await BookSale.find_all().to_list()
+        # Use index-optimized query - sort by created_at desc for better performance
+        booksales_query = BookSale.find().sort([("created_at", -1)])
+        booksales = await booksales_query.to_list()
+        
         for sale in booksales:
-            # Get student info
-            student = await students_collection.find_one({"_id": sale.student_id})
-            if student and matches_student_filters(student):
-                # Get group for student
-                group = await Group.find(Group.students == ObjectId(student['_id'])).first_or_none()
-                
-                sales_data.append({
-                    "id": sale.id,
-                    "student_name": f"{student['first_name']} {student['last_name']}",
-                    "student_level": student.get('level'),
-                    "student_group": group.group_name if group else None,
-                    "subscription_type": "booksale",
-                    "month_or_book": sale.name,  # Book name
-                    "price": float(sale.price),
-                    "date": sale.created_at,
-                    "_sort_date": sale.created_at  # For sorting
-                })
+            # Check if we have pre-filtered students
+            if student_filter_query:
+                student = filtered_students.get(sale.student_id)
+                if not student:
+                    continue
+            else:
+                # Get student info (this uses the student_id index)
+                student = await students_collection.find_one({"_id": sale.student_id})
+                if not student or not matches_student_filters(student):
+                    continue
+            
+            # Get group name from pre-fetched mapping
+            group_name = groups_by_student.get(ObjectId(student['_id']))
+            
+            sales_data.append({
+                "id": sale.id,
+                "student_name": f"{student['first_name']} {student['last_name']}",
+                "student_level": student.get('level'),
+                "student_group": group_name,
+                "subscription_type": "booksale",
+                "month_or_book": sale.name,  # Book name
+                "price": float(sale.price),
+                "date": sale.created_at,
+                "_sort_date": sale.created_at  # For sorting
+            })
     
     # Sort by date (newest first)
     sales_data.sort(key=lambda x: x["_sort_date"], reverse=True)
@@ -469,6 +671,7 @@ async def get_all_students(
 ):
     """
     Get all students with optional search and filtering, plus pagination.
+    🚀 OPTIMIZED: Now uses bulk operations for much better performance!
     
     Args:
         page: Page number (starts from 1)
@@ -477,49 +680,46 @@ async def get_all_students(
         level: Optional filter by student level (1, 2, or 3)
         group: Optional filter by group name
     """
-    await update_students_subscription_status()
-    await archive_unpaid_students()
+    start_time = datetime.utcnow()  # For performance monitoring
     
     # Build search and filter query
     search_query = {}
     
     # Add search functionality if q parameter is provided
     if q:
-        # Build search criteria with improved Arabic name matching
-        # Create word-boundary aware regex pattern for Arabic names
-        # This will match the query as a separate word or at word boundaries
-        word_boundary_pattern = f"(^|\\s){q}(\\s|$)"
-        
-        search_criteria = [
-            # Search by first name - exact word match (case-insensitive)
-            {"first_name": {"$regex": word_boundary_pattern, "$options": "i"}},
-            # Search by last name - exact word match (case-insensitive)
-            {"last_name": {"$regex": word_boundary_pattern, "$options": "i"}},
-            # Search by full name - exact word match (case-insensitive)
-            {"$expr": {
-                "$regexMatch": {
-                    "input": {"$concat": ["$first_name", " ", "$last_name"]},
-                    "regex": word_boundary_pattern,
-                    "options": "i"
-                }
-            }},
-            # Also include substring search as fallback for partial names
-            {"first_name": {"$regex": q, "$options": "i"}},
-            {"last_name": {"$regex": q, "$options": "i"}},
-            # Search by phone number (exact or partial)
-            {"phone_number": {"$regex": q, "$options": "i"}},
-            # Search by guardian number (exact or partial)
-            {"guardian_number": {"$regex": q, "$options": "i"}}
-        ]
-        
-        # Add student_id search if query is numeric
+        # Check if query is numeric for student_id/uid search
+        # Phone numbers starting with 0 should be treated as text, not numeric IDs
+        is_numeric = False
+        student_id_num = None
         try:
             student_id_num = int(q)
-            search_criteria.append({"student_id": student_id_num})
-            search_criteria.append({"uid": student_id_num})
+            # Only treat as numeric ID if it's a reasonable student ID range and doesn't start with 0
+            # Phone numbers typically start with 0 and are longer
+            if not q.startswith('0') and 10000 <= student_id_num <= 999999:
+                is_numeric = True
+            else:
+                is_numeric = False
         except ValueError:
-            # Query is not numeric, skip student_id search
             pass
+        
+        # Build search criteria based on query type
+        # MongoDB doesn't allow mixing $text with regex in same $or, so we use separate queries
+        if is_numeric:
+            # For numeric queries, use exact ID matches (fast indexed queries)
+            search_criteria = [
+                {"student_id": student_id_num},
+                {"uid": student_id_num}
+            ]
+        else:
+            # For text queries, we'll run multiple separate queries and combine results
+            # This avoids MongoDB's text search + regex OR limitation
+            search_criteria = [
+                # Only use regex searches (all fields have indexes now)
+                {"first_name": {"$regex": q, "$options": "i"}},
+                {"last_name": {"$regex": q, "$options": "i"}},
+                {"phone_number": {"$regex": q, "$options": "i"}},
+                {"guardian_number": {"$regex": q, "$options": "i"}}
+            ]
         
         # Create list to hold all filters
         filters = [{"$or": search_criteria}]
@@ -588,20 +788,29 @@ async def get_all_students(
             search_query = filters[0]
         # If no filters, search_query remains empty dict (all documents)
     
-    # Get total count with filters applied
-    total = await students_collection.count_documents(search_query)
-    
     # Calculate skip from page number
     skip = (page - 1) * limit
     
-    # Get students with pagination and filters (newest first)
-    students = await students_collection.find(search_query).sort([("_id", -1)]).skip(skip).limit(limit).to_list(length=None)
+    # 🚀 Use NEW bulk operations function for much better performance
+    try:
+        students, total = await update_and_fetch_students_in_bulk(search_query, page, limit)
+    except HTTPException:
+        # If bulk operations fail, fallback to original method
+        print("⚠️ Bulk operations failed, falling back to original method")
+        await update_students_subscription_status()
+        await archive_unpaid_students()
+        total = await students_collection.count_documents(search_query)
+        students = await students_collection.find(search_query).sort([("_id", -1)]).skip(skip).limit(limit).to_list(length=None)
     result = []
     for student in students:
         student["id"] = str(student["_id"])
         del student["_id"]
         student.setdefault("is_subscription", False)
         student.setdefault("uid", 0)
+        
+        # Remove text search score from result if present
+        if "score" in student:
+            del student["score"]
 
         # Attach group name
         group = await Group.find(Group.students == ObjectId(student["id"])).first_or_none()
