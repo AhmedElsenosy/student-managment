@@ -884,6 +884,12 @@ async def make_attendance_by_uid(uid: int, assistant=Depends(get_current_assista
     """
     Make attendance for a student using their UID (moved from fingerprint backend)
     This endpoint allows manual attendance marking by UID
+    
+    🚀 NEW: Now includes group-aware duplicate prevention
+    - Students can only attend once per group session day
+    - Validates against group schedule
+    - Prevents duplicate attendance on same group day
+    - Keeps same attendance key format: attendance[2025-01-02] = true
     """
     try:
         # Find the student by UID
@@ -891,35 +897,62 @@ async def make_attendance_by_uid(uid: int, assistant=Depends(get_current_assista
         if not student:
             raise HTTPException(status_code=404, detail="Student not found")
         
+        # 🔍 FIND STUDENT'S GROUP (required for schedule validation)
+        group = await Group.find(Group.students == student.id).first_or_none()
+        if not group:
+            raise HTTPException(status_code=404, detail="Student is not assigned to any group")
+        
         # Get current timestamp and date in Egypt timezone
         egypt_tz = pytz.timezone("Africa/Cairo")
         now = datetime.now(egypt_tz)
         iso_timestamp = now.isoformat()
-        date_key = now.strftime("%Y-%m-%d")
+        date_key = now.strftime("%Y-%m-%d")  # Keep same format: 2025-01-02
+        current_day = now.strftime("%A")  # Monday, Tuesday, etc.
+        
+        # 🗓️ VALIDATE: Check if today is a valid group session day
+        allowed_days = [day.value for day in group.days]  # Convert enum to string values
+        if current_day not in allowed_days:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No group session today ({current_day}). Group '{group.group_name}' schedule: {', '.join(allowed_days)}"
+            )
         
         # Initialize attendance if it doesn't exist
         if not hasattr(student, "attendance") or not isinstance(student.attendance, dict):
             student.attendance = {}
         
-        # Mark attendance as present with assistant approved (bypasses schedule validation)
-        student.attendance[date_key] = True
-        await student.save()
+        # 🚫 DUPLICATE PREVENTION: Check if student already attended today
+        if date_key in student.attendance:
+            # Get previous attendance status
+            previous_status = student.attendance[date_key]
+            previous_status_text = "Present" if previous_status else "Absent"
+            
+            raise HTTPException(
+                status_code=409,  # 409 Conflict - resource already exists
+                detail=f"Student {student.first_name} {student.last_name} already marked as {previous_status_text} today ({date_key}). Cannot mark attendance twice on the same group session day."
+            )
         
-        # Get student's group name for response
-        group = await Group.find(Group.students == student.id).first_or_none()
-        group_name = group.group_name if group else "No Group"
+        # ✅ ALL VALIDATIONS PASSED - Record attendance (same key format)
+        student.attendance[date_key] = True  # Keep format: attendance[2025-01-02] = true
+        await student.save()
         
         return {
             "success": True,
-            "message": "Manual attendance recorded successfully",
+            "message": "Attendance recorded successfully",
             "uid": uid,
             "student": f"{student.first_name} {student.last_name}",
-            "group": group_name,
+            "group": group.group_name,
             "date": date_key,
             "status": True,
             "timestamp": iso_timestamp,
+            "day_of_week": current_day,
             "is_manual": True,
-            "assistant_approved": True
+            "assistant_approved": True,
+            "validation": {
+                "group_session_day": True,
+                "allowed_days": allowed_days,
+                "duplicate_check_passed": True
+            }
         }
         
     except HTTPException:
