@@ -10,3 +10,21 @@
 [2025-08-31 11:20:01] Daily absence marking completed successfully
 [2025-08-31 11:20:01] Finished daily absence marking
 ----------------------------------------
+[2025-09-02 23:59:01] Starting daily absence marking...
+[2025-09-02 23:59:01] HTTP Code: 000
+[2025-09-02 23:59:01] Response: 
+[2025-09-02 23:59:01] ERROR: Daily absence marking failed with HTTP code 000
+[2025-09-02 23:59:01] Finished daily absence marking
+----------------------------------------
+[2025-09-03 23:59:01] Starting daily absence marking...
+[2025-09-03 23:59:01] HTTP Code: 000
+[2025-09-03 23:59:01] Response: 
+[2025-09-03 23:59:01] ERROR: Daily absence marking failed with HTTP code 000
+[2025-09-03 23:59:01] Finished daily absence marking
+----------------------------------------
+[2025-09-07 23:59:01] Starting daily absence marking...
+[2025-09-07 23:59:01] HTTP Code: 000
+[2025-09-07 23:59:01] Response: 
+[2025-09-07 23:59:01] ERROR: Daily absence marking failed with HTTP code 000
+[2025-09-07 23:59:01] Finished daily absence marking
+----------------------------------------

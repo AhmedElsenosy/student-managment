@@ -19,6 +19,10 @@ class AttendanceRequest(BaseModel):
     is_absent: bool = False  # Optional parameter to mark student as absent
     marked_by_system: bool = False  # Optional parameter to indicate system marked absent
 
+class AssistantDecisionRequest(BaseModel):
+    decision: str  # 'approve' or 'reject'
+    reason: str = None  # Optional reason for the decision
+
 @router.post("/")
 async def auto_attendance(data: AttendanceRequest, assistant=Depends(get_current_assistant)):
     try:
@@ -880,16 +884,22 @@ async def get_student_attendance_direct(student_id: str, assistant=Depends(get_c
 
 
 @router.post("/make-attendance/{uid}")
-async def make_attendance_by_uid(uid: int, assistant=Depends(get_current_assistant)):
+async def make_attendance_by_uid(
+    uid: int, 
+    assistant=Depends(get_current_assistant)
+):
     """
-    Make attendance for a student using their UID (moved from fingerprint backend)
-    This endpoint allows manual attendance marking by UID
+    Make attendance for a student using their UID with smart validation and approval system
     
-    🚀 NEW: Now includes group-aware duplicate prevention
-    - Students can only attend once per group session day
-    - Validates against group schedule
-    - Prevents duplicate attendance on same group day
-    - Keeps same attendance key format: attendance[2025-01-02] = true
+    🚀 NEW FEATURES:
+    - Group-aware duplicate prevention
+    - Assistant approval for non-group day attendance
+    - Smart attendance assignment to missed group sessions
+    - Prevents attendance abuse (attending group day + non-group day)
+    
+    Parameters:
+    - uid: Student's unique identifier
+    - assistant_decision: Optional - 'approve' or 'reject' for non-group day attendance
     """
     try:
         # Find the student by UID
@@ -906,59 +916,336 @@ async def make_attendance_by_uid(uid: int, assistant=Depends(get_current_assista
         egypt_tz = pytz.timezone("Africa/Cairo")
         now = datetime.now(egypt_tz)
         iso_timestamp = now.isoformat()
-        date_key = now.strftime("%Y-%m-%d")  # Keep same format: 2025-01-02
-        current_day = now.strftime("%A")  # Monday, Tuesday, etc.
-        
-        # 🗓️ VALIDATE: Check if today is a valid group session day
-        allowed_days = [day.value for day in group.days]  # Convert enum to string values
-        if current_day not in allowed_days:
-            raise HTTPException(
-                status_code=400,
-                detail=f"No group session today ({current_day}). Group '{group.group_name}' schedule: {', '.join(allowed_days)}"
-            )
+        today_date_key = now.strftime("%Y-%m-%d")
+        current_day = now.strftime("%A")
+        allowed_days = [day.value for day in group.days]
         
         # Initialize attendance if it doesn't exist
         if not hasattr(student, "attendance") or not isinstance(student.attendance, dict):
             student.attendance = {}
         
-        # 🚫 DUPLICATE PREVENTION: Check if student already attended today
-        if date_key in student.attendance:
-            # Get previous attendance status
-            previous_status = student.attendance[date_key]
-            previous_status_text = "Present" if previous_status else "Absent"
+        # 🎯 MAIN LOGIC: Check if today is a group day or not
+        is_group_day = current_day in allowed_days
+        
+        if is_group_day:
+            # ✅ TODAY IS A GROUP DAY - Check time validation first
             
-            raise HTTPException(
-                status_code=409,  # 409 Conflict - resource already exists
-                detail=f"Student {student.first_name} {student.last_name} already marked as {previous_status_text} today ({date_key}). Cannot mark attendance twice on the same group session day."
-            )
+            # Check for duplicate attendance today
+            if today_date_key in student.attendance:
+                previous_status = student.attendance[today_date_key]
+                previous_status_text = "Present" if previous_status else "Absent"
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Student {student.first_name} {student.last_name} already marked as {previous_status_text} today ({today_date_key}). Cannot mark attendance twice on the same group session day."
+                )
+            
+            # ⏰ TIME VALIDATION: Check if attendance time is within allowed window
+            try:
+                group_start_time_str = group.start_time
+                group_start_time = datetime.strptime(group_start_time_str, "%H:%M").time()
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Invalid group start_time format: {e}")
+            
+            # Calculate allowed time window (1 hour before and after start time)
+            today = now.date()
+            scheduled_start_time = egypt_tz.localize(datetime.combine(today, group_start_time))
+            allowed_start = scheduled_start_time - timedelta(hours=1)
+            allowed_end = scheduled_start_time + timedelta(hours=1)
+            
+            is_within_time_window = allowed_start <= now <= allowed_end
+            
+            if is_within_time_window:
+                # ✅ WITHIN TIME WINDOW - Record attendance directly
+                student.attendance[today_date_key] = True
+                await student.save()
+                
+                return {
+                    "success": True,
+                    "message": "Attendance recorded successfully (within time window)",
+                    "uid": uid,
+                    "student": f"{student.first_name} {student.last_name}",
+                    "level": student.level,
+                    "group": group.group_name,
+                    "date": today_date_key,
+                    "status": True,
+                    "timestamp": iso_timestamp,
+                    "day_of_week": current_day,
+                    "attendance_type": "group_session_on_time",
+                    "validation": {
+                        "is_group_day": True,
+                        "duplicate_check_passed": True,
+                        "within_time_window": True,
+                        "allowed_window": f"{allowed_start.strftime('%H:%M')} - {allowed_end.strftime('%H:%M')}",
+                        "arrival_time": now.strftime('%H:%M')
+                    }
+                }
+            else:
+                # ⚠️ OUTSIDE TIME WINDOW - Require assistant decision
+                return {
+                    "success": False,
+                    "requires_approval": True,
+                    "message": f"Student {student.first_name} {student.last_name} wants to attend on {current_day} at {now.strftime('%H:%M')}. This is outside the allowed time window. Assistant decision required.",
+                    "student_info": {
+                        "uid": uid,
+                        "name": f"{student.first_name} {student.last_name}",
+                        "level": student.level,
+                        "group": group.group_name
+                    },
+                    "violation_details": {
+                        "attempted_day": current_day,
+                        "attempted_time": now.strftime('%H:%M'),
+                        "group_start_time": group_start_time_str,
+                        "allowed_window": f"{allowed_start.strftime('%H:%M')} - {allowed_end.strftime('%H:%M')}",
+                        "violation_type": "outside_time_window"
+                    },
+                    "instructions": "Use POST /attendance/assistant-decision/{uid} with decision parameter to approve/reject"
+                }
         
-        # ✅ ALL VALIDATIONS PASSED - Record attendance (same key format)
-        student.attendance[date_key] = True  # Keep format: attendance[2025-01-02] = true
-        await student.save()
-        
-        return {
-            "success": True,
-            "message": "Attendance recorded successfully",
-            "uid": uid,
-            "student": f"{student.first_name} {student.last_name}",
-            "group": group.group_name,
-            "date": date_key,
-            "status": True,
-            "timestamp": iso_timestamp,
-            "day_of_week": current_day,
-            "is_manual": True,
-            "assistant_approved": True,
-            "validation": {
-                "group_session_day": True,
-                "allowed_days": allowed_days,
-                "duplicate_check_passed": True
+        else:
+            # ⚠️ TODAY IS NOT A GROUP DAY - Special validation needed
+            
+            # 🔍 FIND MOST RECENT GROUP DAY
+            most_recent_group_day = None
+            most_recent_group_date = None
+            
+            # Look back up to 14 days to find the most recent group day
+            for days_back in range(1, 15):
+                check_date = now - timedelta(days=days_back)
+                check_day = check_date.strftime("%A")
+                
+                if check_day in allowed_days:
+                    most_recent_group_day = check_day
+                    most_recent_group_date = check_date.strftime("%Y-%m-%d")
+                    break
+            
+            if not most_recent_group_date:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot find recent group session day for validation"
+                )
+            
+            # 🚫 CHECK: Did student attend the most recent group day?
+            attended_recent_group = student.attendance.get(most_recent_group_date, None)
+            
+            if attended_recent_group is True:
+                # Student already attended recent group day - REJECT without approval option
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Student {student.first_name} {student.last_name} already attended {most_recent_group_day} ({most_recent_group_date}). Cannot mark attendance for non-group day when recent group session was already attended."
+                )
+            
+            # 🎯 STUDENT MISSED RECENT GROUP DAY - Needs assistant approval
+            
+            # Return approval request - Assistant must use separate endpoint for decision
+            return {
+                "success": False,
+                "requires_approval": True,
+                "message": f"Student {student.first_name} {student.last_name} wants to attend on {current_day}. Student missed {most_recent_group_day} group session. Assistant decision required.",
+                "student_info": {
+                    "uid": uid,
+                    "name": f"{student.first_name} {student.last_name}",
+                    "level": student.level,
+                    "group": group.group_name
+                },
+                "violation_details": {
+                    "attempted_day": current_day,
+                    "group_schedule": allowed_days,
+                    "missed_group_day": most_recent_group_day,
+                    "missed_group_date": most_recent_group_date,
+                    "violation_type": "missed_recent_group_session"
+                },
+                "instructions": "Use POST /attendance/assistant-decision/{uid} with decision parameter to approve/reject"
             }
-        }
         
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to mark attendance: {str(e)}")
+
+
+@router.post("/assistant-decision/{uid}")
+async def assistant_attendance_decision(
+    uid: int,
+    decision_data: AssistantDecisionRequest,
+    assistant=Depends(get_current_assistant)
+):
+    """
+    🎯 SEPARATE ASSISTANT DECISION ENDPOINT
+    Handle assistant approval/rejection for non-group day attendance requests
+    
+    This endpoint implements the smart attendance assignment logic when assistant approves
+    attendance for students who missed their group session day.
+    
+    Parameters:
+    - uid: Student's unique identifier
+    - decision_data: Contains decision ('approve' or 'reject') and optional reason
+    """
+    try:
+        # Validate decision
+        if decision_data.decision.lower() not in ["approve", "reject"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid decision. Must be 'approve' or 'reject'"
+            )
+        
+        # Find the student by UID
+        student = await StudentModel.find_one(StudentModel.uid == uid)
+        if not student:
+            raise HTTPException(status_code=404, detail="Student not found")
+        
+        # Find student's group
+        group = await Group.find(Group.students == student.id).first_or_none()
+        if not group:
+            raise HTTPException(status_code=404, detail="Student is not assigned to any group")
+        
+        # Get current timestamp and date
+        egypt_tz = pytz.timezone("Africa/Cairo")
+        now = datetime.now(egypt_tz)
+        iso_timestamp = now.isoformat()
+        today_date_key = now.strftime("%Y-%m-%d")
+        current_day = now.strftime("%A")
+        allowed_days = [day.value for day in group.days]
+        
+        # Initialize attendance if needed
+        if not hasattr(student, "attendance") or not isinstance(student.attendance, dict):
+            student.attendance = {}
+        
+        # Determine if today is a group day
+        is_group_day = current_day in allowed_days
+        
+        # This endpoint handles two scenarios:
+        # 1. Non-group days (missed recent group session)
+        # 2. Group days with time violations (outside allowed time window)
+        
+        if decision_data.decision.lower() == "reject":
+            # ❌ ASSISTANT REJECTED - No changes made
+            return {
+                "success": False,
+                "message": "Attendance request rejected by assistant",
+                "decision": "rejected",
+                "reason": decision_data.reason or "No reason provided",
+                "uid": uid,
+                "student": f"{student.first_name} {student.last_name}",
+                "level": student.level,
+                "group": group.group_name,
+                "attempted_date": today_date_key,
+                "attempted_day": current_day,
+                "attendance_recorded": False,
+                "timestamp": iso_timestamp
+            }
+        
+        elif decision_data.decision.lower() == "approve":
+            # ✅ ASSISTANT APPROVED - Apply smart attendance logic
+            
+            target_date = None
+            action_taken = None
+            
+            if is_group_day:
+                # 🎯 GROUP DAY WITH TIME VIOLATION - Mark attendance for today
+                # Check for duplicate attendance today
+                if today_date_key in student.attendance:
+                    previous_status = student.attendance[today_date_key]
+                    previous_status_text = "Present" if previous_status else "Absent"
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Student {student.first_name} {student.last_name} already marked as {previous_status_text} today ({today_date_key}). Cannot mark attendance twice on the same group session day."
+                    )
+                
+                # Mark attendance for today (group day with assistant approval)
+                student.attendance[today_date_key] = True
+                target_date = today_date_key
+                action_taken = "group_day_time_violation_approved"
+                
+            else:
+                # 🎯 NON-GROUP DAY - SMART ATTENDANCE ASSIGNMENT LOGIC
+                
+                # Priority 1: Find most recent absent day (false) in group schedule
+                recent_absent_date = None
+                for days_back in range(1, 30):  # Look back 30 days
+                    check_date = now - timedelta(days=days_back)
+                    check_day = check_date.strftime("%A")
+                    check_date_key = check_date.strftime("%Y-%m-%d")
+                    
+                    if check_day in allowed_days:
+                        attendance_status = student.attendance.get(check_date_key, None)
+                        if attendance_status is False:  # Found absent day
+                            recent_absent_date = check_date_key
+                            break
+                
+                if recent_absent_date:
+                    # Change most recent absent to present
+                    student.attendance[recent_absent_date] = True
+                    target_date = recent_absent_date
+                    action_taken = "changed_absent_to_present"
+                
+                else:
+                    # Priority 2: Find most recent missing group day
+                    recent_missing_date = None
+                    for days_back in range(1, 30):
+                        check_date = now - timedelta(days=days_back)
+                        check_day = check_date.strftime("%A")
+                        check_date_key = check_date.strftime("%Y-%m-%d")
+                        
+                        if check_day in allowed_days and check_date_key not in student.attendance:
+                            recent_missing_date = check_date_key
+                            break
+                    
+                    if recent_missing_date:
+                        # Mark most recent missing group day as present
+                        student.attendance[recent_missing_date] = True
+                        target_date = recent_missing_date
+                        action_taken = "marked_missing_day_present"
+                    
+                    else:
+                        # Priority 3: Find the most recent group day and mark as present
+                        most_recent_group_date = None
+                        for days_back in range(1, 30):
+                            check_date = now - timedelta(days=days_back)
+                            check_day = check_date.strftime("%A")
+                            check_date_key = check_date.strftime("%Y-%m-%d")
+                            
+                            if check_day in allowed_days:
+                                most_recent_group_date = check_date_key
+                                break
+                        
+                        if most_recent_group_date:
+                            # Override most recent group day to present
+                            student.attendance[most_recent_group_date] = True
+                            target_date = most_recent_group_date
+                            action_taken = "marked_recent_group_day_present"
+                        else:
+                            raise HTTPException(
+                                status_code=400,
+                                detail="Cannot find any recent group session day to assign attendance"
+                            )
+            
+            # Save the student with updated attendance
+            await student.save()
+            
+            return {
+                "success": True,
+                "message": "Attendance request approved and recorded by assistant",
+                "decision": "approved",
+                "reason": decision_data.reason or "Assistant approved makeup attendance",
+                "uid": uid,
+                "student": f"{student.first_name} {student.last_name}",
+                "level": student.level,
+                "group": group.group_name,
+                "attempted_date": today_date_key,
+                "attempted_day": current_day,
+                "recorded_date": target_date,
+                "recorded_day": datetime.strptime(target_date, "%Y-%m-%d").strftime("%A"),
+                "status": True,
+                "timestamp": iso_timestamp,
+                "attendance_type": "assistant_approved_makeup",
+                "action_taken": action_taken,
+                "assistant_approved": True
+            }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process assistant decision: {str(e)}")
 
 
 @router.post("/undo-last/{uid}")

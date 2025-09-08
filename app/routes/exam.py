@@ -443,4 +443,225 @@ async def get_students_for_exam(exam_id: str, assistant=Depends(get_current_assi
 # POST /exams/{exam_id}/submit
 # POST /exams/{exam_id}/students/{student_id}/correct
 
+from pydantic import BaseModel
+
+class ManualCorrectionRequest(BaseModel):
+    exam_id: str
+    student_uid: int
+    student_degree: int
+    model_number: int = 1
+    notes: str = None
+
+@router.post("/manual-correction")
+async def manual_exam_correction(
+    data: ManualCorrectionRequest,
+    assistant=Depends(get_current_assistant)
+):
+    """
+    Manually grade a student's exam.
+    
+    This endpoint allows assistants to manually enter exam grades for students
+    without requiring the student to submit through the fingerprint system.
+    
+    Parameters:
+    - exam_id: The ID of the exam to correct
+    - student_uid: The UID of the student to grade
+    - student_degree: The grade achieved by the student
+    - model_number: Which exam model the student used (1, 2, or 3)
+    - notes: Optional notes about the correction
+    - solution_photo: Optional photo of student's solution
+    """
+    # 1. Validate the exam exists
+    exam = await ExamModel.get(data.exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+    
+    # 2. Validate the student exists
+    student = await StudentModel.find_one(StudentModel.uid == data.student_uid)
+    if not student:
+        raise HTTPException(status_code=404, detail=f"Student with UID {data.student_uid} not found")
+    
+    # 3. Validate the student degree is within range
+    if data.student_degree < 0 or data.student_degree > exam.final_degree:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Student degree must be between 0 and {exam.final_degree}"
+        )
+    
+    # 4. Validate model number
+    if data.model_number < 1 or data.model_number > 3:
+        raise HTTPException(status_code=400, detail="Model number must be 1, 2, or 3")
+        
+    # 5. Calculate percentage
+    degree_percentage = (data.student_degree / exam.final_degree) * 100
+    
+    # 6. Check if student already has this exam
+    existing_exam_entry = None
+    for entry in student.exams:
+        if str(entry.exam_id) == data.exam_id:
+            existing_exam_entry = entry
+            break
+    
+    # 7. Create or update the exam entry
+    if existing_exam_entry:
+        # Update existing entry
+        existing_exam_entry.student_degree = data.student_degree
+        existing_exam_entry.degree_percentage = degree_percentage
+        existing_exam_entry.delivery_time = datetime.now()
+        # Update model number (if not already set)
+        if not hasattr(existing_exam_entry, 'model_number') or existing_exam_entry.model_number is None:
+            existing_exam_entry.model_number = data.model_number
+        # Update notes (if not already set)
+        if data.notes and (not hasattr(existing_exam_entry, 'notes') or not existing_exam_entry.notes):
+            existing_exam_entry.notes = data.notes
+    else:
+        # Create new entry
+        new_entry = ExamEntry(
+            exam_id=data.exam_id,
+            exam_name=exam.exam_name,  # Store exam name for convenience
+            student_degree=data.student_degree,
+            degree_percentage=degree_percentage,
+            delivery_time=datetime.now(),
+            model_number=data.model_number,
+            notes=data.notes
+        )
+        student.exams.append(new_entry)
+    
+    # 8. Save student data
+    await student.save()
+    
+    # 9. Return success response with details
+    return {
+        "success": True,
+        "message": f"Exam grade recorded successfully",
+        "details": {
+            "exam": {
+                "id": str(exam.id),
+                "name": exam.exam_name,
+                "level": exam.exam_level,
+                "final_degree": exam.final_degree
+            },
+            "student": {
+                "uid": student.uid,
+                "name": f"{student.first_name} {student.last_name}",
+                "level": student.level
+            },
+            "grade": {
+                "degree": data.student_degree,
+                "percentage": round(degree_percentage, 2),
+                "model_number": data.model_number,
+                "has_solution_photo": False,
+                "timestamp": datetime.now().isoformat()
+            }
+        }
+    }
+
+
+@router.get("/student/{student_uid}")
+async def get_student_exams(
+    student_uid: int,
+    assistant=Depends(get_current_assistant)
+):
+    """
+    Get all exam data for a specific student by their UID.
+    
+    This endpoint returns all exams that the student has taken,
+    including their grades, percentages, and exam details.
+    
+    Parameters:
+    - student_uid: The UID of the student
+    
+    Returns:
+    - Student information
+    - List of all exams taken by the student
+    - Summary statistics
+    """
+    # 1. Find the student by UID
+    student = await StudentModel.find_one(StudentModel.uid == student_uid)
+    if not student:
+        raise HTTPException(status_code=404, detail=f"Student with UID {student_uid} not found")
+    
+    # 2. Get all exams from the database for reference
+    all_exams = await exams_collection.find({}).to_list(length=None)
+    exam_lookup = {str(exam["_id"]): exam for exam in all_exams}
+    
+    # 3. Process student's exam entries
+    student_exams = []
+    total_score = 0
+    total_possible = 0
+    
+    for exam_entry in student.exams:
+        exam_id = str(exam_entry.exam_id)
+        exam_info = exam_lookup.get(exam_id)
+        
+        if exam_info:
+            # Calculate stats for this exam with null safety
+            student_degree = getattr(exam_entry, 'student_degree', None) or 0
+            degree_percentage = getattr(exam_entry, 'degree_percentage', None) or 0
+            
+            # Ensure numeric values
+            student_degree = student_degree if isinstance(student_degree, (int, float)) else 0
+            degree_percentage = degree_percentage if isinstance(degree_percentage, (int, float)) else 0
+            final_degree = exam_info.get("final_degree", 0) or 0
+            
+            total_score += student_degree
+            total_possible += final_degree
+            
+            student_exam_data = {
+                "exam_id": exam_id,
+                "exam_name": exam_info.get("exam_name", "Unknown Exam"),
+                "exam_level": exam_info.get("exam_level"),
+                "exam_date": exam_info.get("exam_date"),
+                "exam_start_time": exam_info.get("exam_start_time"),
+                "final_degree": final_degree,
+                "student_degree": student_degree,
+                "degree_percentage": round(degree_percentage, 2),
+                "delivery_time": exam_entry.delivery_time,
+                "model_number": getattr(exam_entry, 'model_number', None),
+                "notes": getattr(exam_entry, 'notes', None),
+                "has_solution_photo": bool(getattr(exam_entry, 'solution_photo', None))
+            }
+            student_exams.append(student_exam_data)
+        else:
+            # Exam no longer exists in database, but keep the record
+            student_degree = getattr(exam_entry, 'student_degree', None) or 0
+            degree_percentage = getattr(exam_entry, 'degree_percentage', None) or 0
+            
+            # Ensure numeric values
+            student_degree = student_degree if isinstance(student_degree, (int, float)) else 0
+            degree_percentage = degree_percentage if isinstance(degree_percentage, (int, float)) else 0
+            
+            student_exam_data = {
+                "exam_id": exam_id,
+                "exam_name": getattr(exam_entry, 'exam_name', "Deleted Exam"),
+                "exam_level": None,
+                "exam_date": None,
+                "exam_start_time": None,
+                "final_degree": None,
+                "student_degree": student_degree,
+                "degree_percentage": round(degree_percentage, 2),
+                "delivery_time": exam_entry.delivery_time,
+                "model_number": getattr(exam_entry, 'model_number', None),
+                "notes": getattr(exam_entry, 'notes', None),
+                "has_solution_photo": bool(getattr(exam_entry, 'solution_photo', None)),
+                "exam_deleted": True
+            }
+            student_exams.append(student_exam_data)
+    
+    # 4. Sort exams by delivery time (most recent first)
+    student_exams.sort(key=lambda x: x["delivery_time"] if x["delivery_time"] else datetime.min, reverse=True)
+    
+    return {
+        "success": True,
+        "student": {
+            "uid": student.uid,
+            "name": f"{student.first_name} {student.last_name}",
+            "level": student.level,
+            "phone_number": student.phone_number,
+            "guardian_number": student.guardian_number,
+            "email": student.email,
+            "student_id": student.student_id
+        },
+        "exams": student_exams
+    }
 
